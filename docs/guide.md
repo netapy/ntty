@@ -7,14 +7,24 @@ and recoverable local drafts.
 
 ## Run
 
-Requires Go 1.24+ to build and a recent [Notion CLI](https://ntn.dev).
-Tested with `ntn 0.23.4` on macOS. Authenticate with `ntn login` (or set
-`NOTION_API_TOKEN`), then:
+Install a release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/netapy/ntty/main/install.sh | sh
+```
+
+Or build from source (Go 1.24+):
 
 ```sh
 make build
 ./bin/ntty
 ```
+
+Both need a recent [Notion CLI](https://ntn.dev). Tested with `ntn 0.23.4` on
+macOS. Authenticate with `ntn login` (or set `NOTION_API_TOKEN`).
+
+`ntty upgrade` replaces the running binary with the latest release after
+verifying its checksum; `ntty upgrade --check` only reports.
 
 On macOS, double-click **Launch.command**. `make install` installs the command
 into `~/.local/bin`. A wide terminal (110+ columns) is comfortable.

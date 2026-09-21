@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -156,7 +157,7 @@ func checksumFor(checksums, name string) (string, error) {
 
 // binaryFromArchive extracts the ntty executable from a release tarball.
 func binaryFromArchive(data []byte) ([]byte, error) {
-	gz, err := gzip.NewReader(strings.NewReader(string(data)))
+	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
