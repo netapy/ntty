@@ -16,6 +16,18 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "upgrade", "update":
+			if err := runUpgrade(os.Args[2:]); err != nil {
+				fatal(err)
+			}
+			return
+		case "version", "--version", "-version":
+			fmt.Println("ntty " + versionString())
+			return
+		}
+	}
 	demo := flag.Bool("demo", false, "local playground; makes no Notion calls")
 	parent := flag.String("parent", "", "default notebook: page:<id> or data-source:<id>")
 	profile := flag.String("profile", "default", "local cache namespace (use one per Notion workspace)")

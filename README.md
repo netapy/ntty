@@ -27,30 +27,52 @@ Screenshots are captured from the real interface with fictional demo content.
 
 ![ntty command palette](docs/images/commands.svg)
 
-## Getting started
+## Install
 
-Requires Go 1.24+, a recent [Notion CLI](https://ntn.dev), and a terminal.
-macOS is the primary tested platform.
+macOS and Linux (amd64 and arm64) get prebuilt binaries:
 
 ```sh
-# Install and authenticate ntn first: https://ntn.dev
+curl -fsSL https://raw.githubusercontent.com/netapy/ntty/main/install.sh | sh
+```
+
+This downloads the latest release, verifies its SHA-256 checksum, and installs
+to `~/.local/bin/ntty`. Set `NTTY_INSTALL_DIR` to choose another directory.
+
+ntty calls the [Notion CLI](https://ntn.dev) for authentication, so install
+and sign in to `ntn` first:
+
+```sh
 ntn login
-
-git clone https://github.com/netapy/ntty.git
-cd ntty
-make install
-
-# ~/.local/bin must be on your PATH
 ntty
 ```
 
-To try it without an account:
+### Upgrade
+
+```sh
+ntty upgrade          # download and replace the running binary
+ntty upgrade --check  # only report whether a newer release exists
+```
+
+`ntty upgrade` uses the same release artifacts and checksum verification as the
+installer.
+
+### From source
+
+Requires Go 1.24+:
+
+```sh
+git clone https://github.com/netapy/ntty.git
+cd ntty
+make install
+```
+
+### Try it without an account
 
 ```sh
 ntty --demo
 ```
 
-Startup options:
+### Startup options
 
 ```sh
 ntty --check                    # Read-only connection check

@@ -1,10 +1,12 @@
 .PHONY: build run demo test check install
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION)
 build:
-	go build -o bin/ntty .
+	go build -ldflags "$(LDFLAGS)" -o bin/ntty .
 run:
-	go run .
+	go run -ldflags "$(LDFLAGS)" .
 demo:
-	go run . --demo
+	go run -ldflags "$(LDFLAGS)" . --demo
 test:
 	go test -race ./...
 check:
