@@ -1,0 +1,4 @@
+/bin/
+/ntty
+*.log
+.DS_Store
