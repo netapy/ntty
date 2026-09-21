@@ -17,7 +17,7 @@ func TestBreadcrumbDirectClickAndNarrowLayout(t *testing.T) {
 	}
 	a := newApp(notion.NewDemo(nil), s, store.State{}, nil, "", false)
 	defer a.cancel()
-	root := notion.Page{ID: "root", Title: "Lunar Studio", Kind: "page"}
+	root := notion.Page{ID: "root", Title: "Engineering", Kind: "page"}
 	child := notion.Page{ID: "child", Title: "Conformity / CISO", Kind: "page"}
 	a.docs[root.ID] = &notion.Doc{Page: root, Text: "Draft retained", Dirty: true}
 	a.active = child.ID

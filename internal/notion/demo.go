@@ -17,11 +17,11 @@ type Demo struct {
 }
 
 func NewDemo(cached []Doc) *Demo {
-	d := &Demo{pages: []Page{{ID: "demo-welcome", Title: "A quieter place to think", Kind: "page"}, {ID: "demo-notes", Title: "Quick notes", Kind: "page"}, {ID: "demo-roadmap", Title: "This week", Kind: "page"}}, docs: map[string]Content{}}
+	d := &Demo{pages: []Page{{ID: "demo-welcome", Title: "Welcome", Kind: "page"}, {ID: "demo-notes", Title: "Quick notes", Kind: "page"}, {ID: "demo-roadmap", Title: "This week", Kind: "page"}}, docs: map[string]Content{}}
 	texts := []string{
-		"# A quieter place to think\n\nYour Notion workspace. Just the terminal.\n\n## Make yourself at home\n\n- Click anywhere and start typing.\n- Drag to select text; double-click to select a word.\n- Use Escape for pages; Shift+Tab returns to your notebook.\n- Press Ctrl+K to find a page or command.\n- Press Ctrl+N for a fresh note.\n\n## Write naturally\n\nType paragraphs, # headings, **bold text**, and lists.\n\n- [x] A little less browser\n- [ ] A little more focus\n\n> Local drafts first. Notion sync after a pause.\n\nThis is a local demo. Nothing here touches Notion.\n",
-		"# Quick notes\n\nAn idea worth keeping.\n\n- Coffee with the team\n- Sketch the next thing\n",
-		"# This week\n\n## Focus\n\n- [ ] Ship something useful\n- [ ] Leave room to think\n\n## Friday\n\nWhat went well?\n",
+		"# ntty demo\n\nThis page is local. Nothing here contacts Notion.\n\n## Try it\n\n- Click anywhere and start typing.\n- Drag to select text; double-click selects a word.\n- Press Escape to focus the sidebar.\n- Press Ctrl+K to find a page or run a command.\n- Press Ctrl+N to create a note.\n\n## Formatting\n\nType paragraphs, # headings, **bold text**, and lists.\n\n- [x] Check the sidebar\n- [ ] Edit this page\n\n> Drafts are written locally first, then synced.\n",
+		"# Quick notes\n\n- Call the plumber\n- Renew the domain\n- Book the room for Thursday\n",
+		"# This week\n\n## Focus\n\n- [ ] Finish the import script\n- [ ] Review PR #482\n\n## Friday\n\nWhat went well?\n",
 	}
 	for i, p := range d.pages {
 		d.docs[p.ID] = Content{Object: "page_markdown", ID: p.ID, Markdown: texts[i]}

@@ -174,11 +174,12 @@ func TestMouseEditingAndDraftsDuringSync(t *testing.T) {
 			t.Errorf("title/editor alignment: title %d..%d editor %d..%d", tx, tx+tw, ex, ex+ew)
 		}
 	})
+	initial := a.editor.GetText()
 	a.ui.QueueEvent(tcell.NewEventKey(tcell.KeyRune, 'e', tcell.ModNone))
 	await(func() bool { return strings.HasPrefix(a.editor.GetText(), "# e") })
 	a.ui.QueueUpdateDraw(func() { a.open(a.docs[a.active].Page) })
 	a.ui.QueueEvent(tcell.NewEventKey(tcell.KeyCtrlZ, 0, tcell.ModNone))
-	await(func() bool { return strings.HasPrefix(a.editor.GetText(), "# A") && !a.docs[a.active].Dirty })
+	await(func() bool { return a.editor.GetText() == initial && !a.docs[a.active].Dirty })
 	// The page menu no longer offers a read/write mode switch.
 	a.ui.QueueEvent(tcell.NewEventMouse(127, 2, tcell.Button1, tcell.ModNone))
 	a.ui.QueueEvent(tcell.NewEventMouse(127, 2, tcell.ButtonNone, tcell.ModNone))
@@ -249,8 +250,10 @@ func TestMouseEditingAndDraftsDuringSync(t *testing.T) {
 		h(tview.MouseMove, tcell.NewEventMouse(x+3, y, tcell.Button1, tcell.ModNone), focus)
 		h(tview.MouseLeftUp, tcell.NewEventMouse(x+3, y, tcell.ButtonNone, tcell.ModNone), focus)
 		selected, _, _ := a.editor.GetSelection()
-		if selected != "XA " {
-			t.Errorf("mouse selection: %q", selected)
+		// Typing happens after the heading marker; the drag covers the typed
+		// rune plus the next two characters of the demo page.
+		if want := "X" + initial[2:4]; selected != want {
+			t.Errorf("mouse selection: %q want %q", selected, want)
 		}
 		a.editor.SetText(strings.Repeat("scroll\n", 80), false)
 		h(tview.MouseScrollDown, tcell.NewEventMouse(x, y, tcell.WheelDown, tcell.ModNone), focus)

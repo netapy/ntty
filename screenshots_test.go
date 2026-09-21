@@ -2,17 +2,18 @@ package main
 
 import (
 	"fmt"
-	"github.com/gdamore/tcell/v2"
 	"html"
-	"ntty/internal/notion"
-	"ntty/internal/store"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gdamore/tcell/v2"
+	"ntty/internal/notion"
+	"ntty/internal/store"
 )
 
-// Opt-in captures render the real widgets with entirely fictional content.
+// Opt-in captures render the real widgets with fictional demo content.
 func TestReadmeScreenshots(t *testing.T) {
 	if os.Getenv("NTTY_SCREENSHOTS") != "1" {
 		t.Skip("set NTTY_SCREENSHOTS=1")
@@ -21,9 +22,9 @@ func TestReadmeScreenshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := notion.Page{ID: "demo-studio", Title: "Lunar Studio", Kind: "page", ParentKind: "workspace"}
+	root := notion.Page{ID: "demo-engineering", Title: "Engineering", Kind: "page", ParentKind: "workspace"}
 	pages := []notion.Page{root}
-	for i, title := range []string{"Mission control", "Product roadmap", "Design notes", "Engineering", "Team handbook"} {
+	for i, title := range []string{"Migration plan", "Release checklist", "Meeting notes", "Reading list", "Archive"} {
 		pages = append(pages, notion.Page{ID: fmt.Sprintf("demo-%d", i), Title: title, Kind: "page", ParentID: root.ID, ParentKind: "page_id"})
 	}
 	a := newApp(notion.NewDemo(nil), s, store.State{Pages: pages, Recents: pages[1:4], Pins: pages[1:2]}, nil, "", true)
@@ -36,7 +37,7 @@ func TestReadmeScreenshots(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- a.ui.Run() }()
 	defer func() { a.ui.QueueUpdate(func() { a.cancel(); a.ui.Stop() }); <-done }()
-	content := "# A little space to think.\n\nOne workspace. Your keyboard. A calmer way to build.\n\n## This week\n- [x] Ship the new onboarding flow\n- [ ] Polish the command palette\n- [ ] Make room for the next good idea\n\n## Field notes\nGreat tools get out of the way. **Keep it simple.**\n\n- Research lives next to the roadmap\n- Decisions stay close to the work\n- Small details make the whole thing feel right\n\n> Less switching. More making.\n\n---\n\nNext up: launch notes and a well-earned coffee."
+	content := "# Migration plan\n\nMove the last jobs off the old scheduler.\n\n## Steps\n\n1. Export the job list\n2. Run the import against staging\n3. Compare the output with production\n\n## Checklist\n\n- [x] Export the job list\n- [ ] Test with a real export\n- [ ] Update the runbook\n\n## Batch sizes\n\n<table header-row=\"true\">\n\t<tr>\n\t\t<td>Batch</td>\n\t\t<td>Rows</td>\n\t\t<td>Time</td>\n\t</tr>\n\t<tr>\n\t\t<td>1,000</td>\n\t\t<td>1,024</td>\n\t\t<td>12s</td>\n\t</tr>\n\t<tr>\n\t\t<td>10,000</td>\n\t\t<td>10,240</td>\n\t\t<td>2m</td>\n\t</tr>\n</table>"
 	a.ui.QueueUpdateDraw(func() {
 		a.active = pages[1].ID
 		a.listed = pages
@@ -53,7 +54,9 @@ func TestReadmeScreenshots(t *testing.T) {
 	capture := func(name string) {
 		a.ui.QueueUpdate(func() {
 			var svg strings.Builder
-			svg.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="888" viewBox="0 0 1440 888"><rect width="1440" height="888" rx="24" fill="#191a21"/><rect x="24" y="24" width="1392" height="840" rx="14" fill="#282a36"/><path d="M24 78H1416" stroke="#44475a"/><circle cx="49" cy="51" r="6" fill="#ff5555"/><circle cx="71" cy="51" r="6" fill="#f1fa8c"/><circle cx="93" cy="51" r="6" fill="#50fa7b"/><text x="720" y="57" text-anchor="middle" fill="#6272a4" font-family="monospace" font-size="14">ntty — Lunar Studio</text><g font-family="'DejaVu Sans Mono', monospace" font-size="17">`)
+			// Minimal macOS-like window: rounded corners, a thin title bar with
+			// traffic lights, no window title.
+			svg.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" width="1302" height="888" viewBox="0 0 1302 888"><rect width="1302" height="888" rx="26" fill="#191a21"/><rect x="24" y="24" width="1254" height="840" rx="12" fill="#282a36" stroke="#44475a" stroke-width="1"/><path d="M24 70H1278" stroke="#44475a"/><circle cx="52" cy="47" r="6" fill="#ff5f57"/><circle cx="74" cy="47" r="6" fill="#febc2e"/><circle cx="96" cy="47" r="6" fill="#28c840"/><g font-family="'SF Mono', Menlo, Monaco, 'DejaVu Sans Mono', monospace" font-size="16">`)
 			for y := 0; y < 32; y++ {
 				for x := 0; x < 116; x++ {
 					r, comb, style, _ := screen.GetContent(x, y)
@@ -78,7 +81,7 @@ func TestReadmeScreenshots(t *testing.T) {
 							color = "#bd93f9"
 						}
 					}
-					fmt.Fprintf(&svg, `<text x="%d" y="%d" fill="%s" font-weight="%s">%s</text>`, 44+x*11, 111+y*23, color, weight, html.EscapeString(string(r)+string(comb)))
+					fmt.Fprintf(&svg, `<text x="%.1f" y="%.1f" fill="%s" font-weight="%s">%s</text>`, 40+float64(x)*10.5, 103+float64(y)*22, color, weight, html.EscapeString(string(r)+string(comb)))
 				}
 			}
 			svg.WriteString(`</g></svg>`)
