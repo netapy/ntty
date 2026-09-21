@@ -344,6 +344,9 @@ type pageView struct {
 }
 
 func canonicalID(id string) string {
+	if len(id) == 36 && id[8] == '-' && id[13] == '-' && id[18] == '-' && id[23] == '-' && strings.Count(id, "-") == 4 {
+		return strings.ToLower(id)
+	}
 	id = strings.ToLower(strings.ReplaceAll(id, "-", ""))
 	if len(id) != 32 {
 		return id

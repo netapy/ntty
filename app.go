@@ -81,6 +81,9 @@ type app struct {
 	listed, visible                             []notion.Page
 	cursor, query, container, parent            string
 	listing                                     bool
+	startupListPending                          bool
+	activityFrame                               int
+	reducedMotion                               bool
 	listGen                                     int
 	listCancel                                  context.CancelFunc
 	listCache                                   map[string]cachedList
@@ -100,6 +103,7 @@ type cachedList struct {
 func newApp(backend notion.Backend, s *store.Store, state store.State, drafts []notion.Doc, parent string, demo bool) *app {
 	ctx, cancelContext := context.WithCancel(context.Background())
 	a := &app{ui: tview.NewApplication(), backend: backend, store: s, state: state, docs: map[string]*notion.Doc{}, changed: map[string]time.Time{}, blocked: map[string]bool{}, draftNotices: map[string]string{}, fetching: map[string]bool{}, remoteChecked: map[string]time.Time{}, parent: parent, ctx: ctx, listCache: map[string]cachedList{}, demo: demo, viewStates: map[string]pageView{}, treeExpanded: map[string]bool{}}
+	a.reducedMotion = os.Getenv("NTTY_REDUCED_MOTION") == "1"
 	for _, id := range state.ExpandedPages {
 		a.treeExpanded[canonicalID(id)] = true
 	}
@@ -534,12 +538,15 @@ func (a *app) run() error {
 	defer a.cancel()
 	go func() {
 		a.ui.QueueUpdateDraw(func() {
-			a.loadList("", "", false, false)
+			a.startupListPending = true
 			if a.state.Last != "" {
 				if d, err := a.store.LoadDoc(a.state.Last); err == nil {
 					a.open(d.Page)
+				} else if p, ok := a.knownPage(a.state.Last); ok {
+					a.open(p)
 				}
 			}
+			a.startWorkspaceRefresh()
 		})
 	}()
 	go func() {
@@ -559,6 +566,7 @@ func (a *app) run() error {
 					}
 					a.autoSave(now)
 					a.autoRefresh(now)
+					a.startWorkspaceRefresh()
 					a.refreshPageMetadata(now)
 					a.checkDraftWrites()
 					if before != "" && now.After(a.noticeUntil) {
@@ -566,6 +574,10 @@ func (a *app) run() error {
 					}
 					after := a.status.GetText(false)
 					draw = draw || before != after || wasSaving != a.syncing()
+					if !a.reducedMotion && a.networkBusy() {
+						a.activityFrame = (a.activityFrame + 1) % len(activityFrames)
+						draw = true
+					}
 				})
 				if draw {
 					a.ui.Draw()
@@ -574,6 +586,20 @@ func (a *app) run() error {
 		}
 	}()
 	return a.ui.Run()
+}
+
+// Content gets the first request through the serialized Notion client.
+// Workspace indexing is background work and must not delay opening a page.
+func (a *app) startWorkspaceRefresh() {
+	if a.startupListPending && a.fetchPage == "" && !a.syncing() {
+		a.loadList("", "", false, false)
+	}
+}
+
+var activityFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func (a *app) networkBusy() bool {
+	return a.listing || a.fetching[a.active] || a.syncing()
 }
 
 func (a *app) message(s string, bad bool) {
@@ -643,9 +669,11 @@ func (a *app) updateStatusIcon() {
 	label, style := "·", quiet
 	if a.statusImportant {
 		label, style = "!", tcell.StyleDefault.Foreground(tcell.ColorOlive)
+	} else if a.networkBusy() && !a.reducedMotion {
+		label, style = activityFrames[a.activityFrame], accent
 	} else if a.syncing() || a.needsSync(a.active) {
 		label = "↑"
-	} else if a.fetching[a.active] {
+	} else if a.fetching[a.active] || a.listing {
 		label = "↓"
 	} else if a.status.GetText(false) != "" {
 		label = "i"
@@ -671,14 +699,23 @@ func (a *app) rebuildList() {
 	recentSelected := selected(a.recents, a.recentPages)
 	workspaceSelected := selected(a.list, a.visible)
 
+	// Build once per refresh rather than scanning the entire workspace for
+	// each row. Preserve knownPage's precedence: open docs, pages, then pins.
+	trashed := make(map[string]bool, len(a.state.Pages))
+	for _, pages := range [][]notion.Page{a.state.Pins, a.state.Pages} {
+		for i := len(pages) - 1; i >= 0; i-- {
+			trashed[canonicalID(pages[i].ID)] = pages[i].InTrash
+		}
+	}
+	for id, doc := range a.docs {
+		trashed[canonicalID(id)] = doc.Page.InTrash
+	}
+	query := strings.ToLower(a.sidebarFilter)
 	filter := func(p notion.Page) bool {
-		if p.InTrash {
+		if p.InTrash || trashed[canonicalID(p.ID)] {
 			return false
 		}
-		if known, ok := a.knownPage(p.ID); ok && known.InTrash {
-			return false
-		}
-		return strings.Contains(strings.ToLower(p.Title), strings.ToLower(a.sidebarFilter))
+		return query == "" || strings.Contains(strings.ToLower(p.Title), query)
 	}
 	a.favoritePages = nil
 	for _, p := range a.state.Pins {
@@ -724,7 +761,7 @@ func (a *app) rebuildList() {
 		roots := append([]notion.Page{}, a.visible...)
 		children := map[string][]notion.Page{}
 		for _, p := range a.state.Pages {
-			if p.ParentKind == "page_id" && p.ParentID != "" {
+			if p.ParentKind == "page_id" && p.ParentID != "" && filter(p) {
 				children[canonicalID(p.ParentID)] = append(children[canonicalID(p.ParentID)], p)
 			}
 		}
@@ -995,6 +1032,7 @@ func (a *app) scanWorkspace(ctx context.Context, gen int, known []notion.Page) {
 }
 
 func (a *app) loadList(query, container string, more, force bool) {
+	a.startupListPending = false
 	if more && (a.cursor == "" || a.listing) {
 		a.sidebarExpanded = true
 		a.rebuildList()
@@ -1139,7 +1177,9 @@ func (a *app) open(p notion.Page) {
 	}
 	a.setTitle(p.Title)
 	a.setBreadcrumb(p)
-	a.resolveBreadcrumb(p)
+	if a.breadcrumbCancel != nil {
+		a.breadcrumbCancel()
+	}
 	a.state.Last = p.ID
 	a.persistState()
 	d := a.docs[p.ID]
@@ -1157,6 +1197,7 @@ func (a *app) open(p notion.Page) {
 		a.showDoc(d)
 		if a.needsSync(p.ID) {
 			a.message("Recovered local draft · syncing automatically after a short pause", false)
+			a.resolveBreadcrumb(p)
 			return
 		}
 		// Cached content is shown immediately, then always validated in the
@@ -1195,6 +1236,11 @@ func (a *app) fetchContent(p notion.Page, quiet bool) {
 		a.ui.QueueUpdateDraw(func() {
 			if sequence != a.fetchSeq {
 				return
+			}
+			// Parent discovery can take several requests; start it only after
+			// the document read, using cached breadcrumbs in the meantime.
+			if a.active == p.ID {
+				a.resolveBreadcrumb(p)
 			}
 			delete(a.fetching, p.ID)
 			a.fetchCancel = nil

@@ -26,6 +26,10 @@ macOS. Authenticate with `ntn login` (or set `NOTION_API_TOKEN`).
 `ntty upgrade` replaces the running binary with the latest release after
 verifying its checksum; `ntty upgrade --check` only reports.
 
+Cached pages open immediately while Notion refreshes in the background. A small
+status spinner indicates loading or syncing. Set `NTTY_REDUCED_MOTION=1` to use
+static status icons instead.
+
 On macOS, double-click **Launch.command**. `make install` installs the command
 into `~/.local/bin`. A wide terminal (110+ columns) is comfortable.
 

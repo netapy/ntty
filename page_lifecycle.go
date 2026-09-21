@@ -45,7 +45,7 @@ func (a *app) renamePageDialog(page notion.Page) {
 // active page, then visible sidebar entries; never infer deletion from absence
 // in a partial search response or from a transport/permission error.
 func (a *app) refreshPageMetadata(now time.Time) {
-	if a.demo || a.modal || a.quitting || a.syncing() || a.trashBusy || a.pageCheckBusy {
+	if a.demo || a.modal || a.quitting || a.syncing() || a.trashBusy || a.pageCheckBusy || a.fetching[a.active] {
 		return
 	}
 	if a.pageChecks == nil {
