@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 	"ntty/internal/notion"
 	"ntty/internal/store"
 )
@@ -47,7 +48,7 @@ func TestStartupCachedPageBeforeBackgroundRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := notion.Page{ID: "startup", Title: "Startup", Kind: "page", ParentKind: "workspace"}
+	p := notion.Page{ID: "startup", Title: "Startup", Kind: "page", ParentKind: "page_id", ParentID: "uncached-parent"}
 	d := notion.Doc{Page: p, Text: "Cached content", Base: notion.Content{Object: "page_markdown", Markdown: "Cached content"}}
 	if err := s.SaveDoc(d); err != nil {
 		t.Fatal(err)
@@ -160,5 +161,19 @@ func BenchmarkSidebarLargeWorkspace(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		a.rebuildList()
+	}
+}
+
+func BenchmarkSearchLargeWorkspace(b *testing.B) {
+	s, err := store.Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	a := newApp(notion.NewDemo(nil), s, largeWorkspace(), nil, "", false)
+	defer a.cancel()
+	p := &commandMenu{input: tview.NewInputField().SetText("project"), list: tview.NewList()}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.filterPalette(p)
 	}
 }

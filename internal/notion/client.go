@@ -61,9 +61,14 @@ func wait(ctx context.Context, d time.Duration) error {
 
 var retryAfter = regexp.MustCompile(`(?i)retry[-_ ]after["\s:=]+([0-9]+)`)
 
+func isRateLimit(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "rate_limited") || strings.Contains(s, "429") || strings.Contains(s, "rate limited")
+}
+
 func retryDelay(err error, attempt int, read bool) time.Duration {
 	s := strings.ToLower(err.Error())
-	rate := strings.Contains(s, "rate_limited") || strings.Contains(s, "429") || strings.Contains(s, "rate limited")
+	rate := isRateLimit(err)
 	transient := strings.Contains(s, "503") || strings.Contains(s, "502") || strings.Contains(s, "504") || strings.Contains(s, "service_unavailable")
 	if !rate && !(read && transient) {
 		return 0
@@ -79,12 +84,6 @@ func retryDelay(err error, attempt int, read bool) time.Duration {
 }
 
 func (c *Client) api(ctx context.Context, method, path string, body any, read bool, dest any) error {
-	select {
-	case c.gate <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() { <-c.gate }()
 	var data []byte
 	if body != nil {
 		var err error
@@ -95,7 +94,13 @@ func (c *Client) api(ctx context.Context, method, path string, body any, read bo
 	}
 	args := []string{"api", path, "-X", method}
 	for attempt := 0; ; attempt++ {
+		select {
+		case c.gate <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		if err := wait(ctx, time.Until(c.last.Add(c.interval))); err != nil {
+			<-c.gate
 			return err
 		}
 		c.last = time.Now()
@@ -110,12 +115,19 @@ func (c *Client) api(ctx context.Context, method, path string, body any, read bo
 			}
 		}
 		if err == nil {
+			<-c.gate
 			if err = json.Unmarshal(out, dest); err != nil {
 				return fmt.Errorf("invalid ntn response: %w", err)
 			}
 			return nil
 		}
 		delay := retryDelay(err, attempt, read)
+		// A server rate limit applies to every caller; a transient read's
+		// retry sleep does not need to occupy the execution slot.
+		if delay > 0 && isRateLimit(err) {
+			c.last = time.Now().Add(delay - c.interval)
+		}
+		<-c.gate
 		if attempt >= 3 || delay == 0 {
 			return err
 		}

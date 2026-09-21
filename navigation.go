@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
+	"github.com/rivo/uniseg"
 	"ntty/internal/notion"
 )
 
@@ -32,8 +32,31 @@ func (a *app) setBreadcrumb(page notion.Page) {
 	if resolved := a.resolvedPaths[canonicalID(page.ID)]; len(resolved) > 0 {
 		chain = resolved
 	}
-	a.breadcrumbPages = chain
+	a.breadcrumbPages = compactBreadcrumb(chain)
 	a.renderBreadcrumb(0)
+}
+
+func compactBreadcrumb(chain []notion.Page) []notion.Page {
+	result := make([]notion.Page, 0, len(chain))
+	seen := make(map[string]bool, len(chain))
+	for _, p := range chain {
+		id := canonicalID(p.ID)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if len(result) > 0 {
+			previous := result[len(result)-1]
+			// Notion's database and its single data source often share a name.
+			// They represent one navigation step; distinct same-named pages don't.
+			if previous.Kind == "database" && p.Kind == "data_source" && p.Title == previous.Title && canonicalID(p.ParentID) == canonicalID(previous.ID) {
+				result[len(result)-1] = p
+				continue
+			}
+		}
+		result = append(result, p)
+	}
+	return result
 }
 
 type breadcrumbLink struct {
@@ -45,28 +68,34 @@ func (a *app) renderBreadcrumb(width int) {
 	chain := a.breadcrumbPages
 	labels := make([]string, len(chain))
 	for i, p := range chain {
-		label := p.Title
+		label := strings.Join(strings.Fields(p.Title), " ")
 		labels[i] = label
 	}
 	start := 0
 	prefix := "  Workspace  /  "
-	for width > 0 && start < len(chain)-2 && runewidth.StringWidth(prefix+strings.Join(labels[start:], "  /  ")) > width {
+	for width > 0 && start < len(chain)-2 && uniseg.StringWidth(prefix+strings.Join(labels[start:], "  /  ")) > width {
 		start++
 		prefix = "  …  /  "
 	}
+	if width > 0 && len(chain) > 0 && width < uniseg.StringWidth(prefix)+5*(len(chain)-start-1)+len(chain)-start {
+		start, prefix = len(chain)-1, "  … / "
+		if width <= uniseg.StringWidth(prefix) {
+			prefix = ""
+		}
+	}
 	if width > 0 && len(chain)-start > 0 {
-		available := max(1, (width-runewidth.StringWidth(prefix)-5*(len(chain)-start-1))/(len(chain)-start))
+		available := max(1, (width-uniseg.StringWidth(prefix)-5*(len(chain)-start-1))/(len(chain)-start))
 		for i := start; i < len(labels); i++ {
-			labels[i] = runewidth.Truncate(labels[i], available, "…")
+			labels[i] = ellipsize(labels[i], available)
 		}
 	}
 	a.breadcrumbLinks = nil
-	pos := runewidth.StringWidth(prefix)
-	if start > 0 {
+	pos := uniseg.StringWidth(prefix)
+	if start > 0 && prefix != "" {
 		a.breadcrumbLinks = append(a.breadcrumbLinks, breadcrumbLink{2, 3, chain[start-1]})
 	}
 	for i := start; i < len(chain); i++ {
-		end := pos + runewidth.StringWidth(labels[i])
+		end := pos + uniseg.StringWidth(labels[i])
 		a.breadcrumbLinks = append(a.breadcrumbLinks, breadcrumbLink{pos, end, chain[i]})
 		pos = end + 5
 	}
@@ -77,6 +106,13 @@ func (a *app) renderBreadcrumb(width int) {
 }
 
 func (a *app) resolveBreadcrumb(page notion.Page) {
+	if len(a.resolvedPaths[canonicalID(page.ID)]) > 0 {
+		return
+	}
+	// A complete local parent chain needs no remote ancestry walk.
+	if len(a.breadcrumbPages) > 0 && a.breadcrumbPages[0].ParentKind == "workspace" && canonicalID(a.breadcrumbPages[len(a.breadcrumbPages)-1].ID) == canonicalID(page.ID) {
+		return
+	}
 	if a.breadcrumbCancel != nil {
 		a.breadcrumbCancel()
 	}
@@ -354,14 +390,15 @@ func canonicalID(id string) string {
 	return id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
 }
 func (a *app) knownPage(id string) (notion.Page, bool) {
+	if a.pageIndex == nil {
+		a.indexPages()
+	}
 	id = canonicalID(id)
 	if d := a.docs[id]; d != nil {
 		return d.Page, true
 	}
-	for _, p := range a.state.Pages {
-		if canonicalID(p.ID) == id {
-			return p, true
-		}
+	if i, ok := a.pageIndex[id]; ok && i < len(a.state.Pages) && canonicalID(a.state.Pages[i].ID) == id {
+		return a.state.Pages[i], true
 	}
 	for _, p := range a.state.Pins {
 		if canonicalID(p.ID) == id {

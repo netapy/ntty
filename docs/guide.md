@@ -156,30 +156,43 @@ reserved by macOS.
 
 - All Notion calls are `ntn api` subprocesses with JSON passed through stdin.
   The application never reads your token or keychain itself.
-- Requests are serialized, with at least **650ms between starts**. The clean,
-  active page is checked for Notion-side edits every **5 seconds**; dirty pages
+- Requests are serialized, with at least **650ms between starts**. Clean-page
+  checks start at **5 seconds**, then back off to **15, 30, and 60 seconds** while
+  unchanged. After two minutes without keyboard/mouse activity, checks slow to
+  three minutes; returning to the app requests fresh validation. Dirty pages
   are never replaced and instead merge during their normal save preflight.
   Scrolling never fetches pages. On first launch, ntty walks the
   paginated search results once to discover accessible workspace roots and
   child relationships; that index is cached for 24 hours and can be rebuilt
   from **Refresh workspace index** in the command palette. Rapid page switches
   cancel the older read so a slow response cannot replace the newer page.
+- Background metadata checks share a budget of one request per **15 seconds**;
+  the active page is eligible once a minute, other sidebar pages once every ten
+  minutes. Saves and interactive operations take precedence over new metadata
+  checks. Failed background reads share a cooldown of 15 seconds to five minutes;
+  explicit refresh remains available. Cached breadcrumb paths are reused until
+  their metadata changes.
 - Reopening a page paints its local cache immediately, then validates it in the
   background instead of trusting a stale time window. Search results have a
   **1-minute in-memory cache**; API search pages contain up to 100 results.
 - Every edit is queued to one serial, coalescing atomic draft writer so typing
   never waits for disk sync. Quit and remote sync flush the latest draft first.
+  Workspace metadata and comment drafts use the same background writer; unchanged
+  page metadata causes no disk write or cache invalidation.
   Autosave waits for exactly **3 seconds idle**. A transient failure starts a
   fresh 3-second retry window; there is no second hidden throttle. Each save
   normally costs one read and one write.
 - HTTP 429 errors back off exponentially, respecting `Retry-After` when `ntn`
   includes it in the error. Raw PATCH requests are never blindly repeated after
   an ambiguous server error: ntty first reconciles the exact persisted
-  preflight/target pair. Ambiguous creates are not automatically repeated.
+  preflight/target pair. Create/comment requests are recorded before sending.
+  Uncertain attempts remain locked across restarts: use **Pending writes** in
+  the command palette to inspect the exact request and resolve its outcome after
+  checking Notion. Matching titles or comment text alone never proves success.
 - Before saving, compare the remote Markdown with the draft's base. Independent
   local and Notion edits merge automatically across blocks and within the same
-  paragraph; concurrent insertions at the same boundary retain both additions.
-  Only genuinely competing replacements pause sync and keep the draft. A paused draft stays paused
+  paragraph; incompatible insertions at the same boundary pause sync and keep
+  the draft. A paused draft stays paused
   while you type; `Ctrl+S` explicitly retries the full preflight, and restoring
   a revision starts a fresh safe autosync. Saves use unique server-side exact-match
   `update_content` targets. Pure block insertion at the document's start or end

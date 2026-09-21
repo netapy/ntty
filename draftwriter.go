@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"sync"
 
 	"ntty/internal/notion"
@@ -9,9 +11,13 @@ import (
 )
 
 type queuedDraft struct {
-	seq uint64
-	doc notion.Doc
+	seq     uint64
+	doc     notion.Doc
+	state   *store.State
+	comment *store.Intent
 }
+
+const stateWriteID = "workspace state" // Not a valid page ID.
 
 // draftWriter serializes and coalesces atomic draft writes so disk sync never
 // blocks typing. Flush is used before remote writes and shutdown.
@@ -37,10 +43,35 @@ func newDraftWriter(ctx context.Context, s *store.Store) *draftWriter {
 }
 
 func (w *draftWriter) Put(doc notion.Doc) {
+	w.put(doc.Page.ID, queuedDraft{doc: doc})
+}
+
+func (w *draftWriter) PutState(state store.State) {
+	// ponytail: reuse the atomic writer, with an immutable snapshot. Drafts
+	// have priority; FlushAll also makes the latest workspace state durable.
+	state.Pages = slices.Clone(state.Pages)
+	state.Pins = slices.Clone(state.Pins)
+	state.Recents = slices.Clone(state.Recents)
+	state.People = slices.Clone(state.People)
+	state.ExpandedPages = slices.Clone(state.ExpandedPages)
+	state.DatabaseViews = maps.Clone(state.DatabaseViews)
+	state.DatabaseGroups = maps.Clone(state.DatabaseGroups)
+	state.DatabaseSorts = maps.Clone(state.DatabaseSorts)
+	w.put(stateWriteID, queuedDraft{state: &state})
+}
+
+func commentDraftID(page, discussion string) string { return "comment:" + page + ":" + discussion }
+
+func (w *draftWriter) PutCommentDraft(page, discussion, body string) {
+	w.put(commentDraftID(page, discussion), queuedDraft{comment: &store.Intent{PageID: page, DiscussionID: discussion, Body: body}})
+}
+
+func (w *draftWriter) put(id string, q queuedDraft) {
 	w.mu.Lock()
 	w.next++
-	w.latest[doc.Page.ID] = w.next
-	w.pending[doc.Page.ID] = queuedDraft{w.next, doc}
+	q.seq = w.next
+	w.latest[id] = w.next
+	w.pending[id] = q
 	w.mu.Unlock()
 	select {
 	case w.wake <- struct{}{}:
@@ -60,15 +91,25 @@ func (w *draftWriter) run(ctx context.Context) {
 			w.mu.Lock()
 			var id string
 			var q queuedDraft
-			for id, q = range w.pending {
-				delete(w.pending, id)
-				break
+			for key, value := range w.pending {
+				id, q = key, value
+				if key != stateWriteID {
+					break
+				}
 			}
+			delete(w.pending, id)
 			w.mu.Unlock()
 			if id == "" {
 				break
 			}
-			err := w.store.SaveDoc(q.doc)
+			var err error
+			if q.state != nil {
+				err = w.store.SaveState(*q.state)
+			} else if q.comment != nil {
+				err = w.store.SaveCommentDraft(q.comment.PageID, q.comment.DiscussionID, q.comment.Body)
+			} else {
+				err = w.store.SaveDoc(q.doc)
+			}
 			w.mu.Lock()
 			if q.seq > w.completed[id] {
 				w.completed[id] = q.seq

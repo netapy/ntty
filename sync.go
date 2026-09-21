@@ -37,14 +37,52 @@ func (a *app) needsSync(id string) bool {
 // Keep the active clean page live with Notion. Dirty pages are never replaced:
 // their next save performs the same remote preflight and merge instead.
 func (a *app) autoRefresh(now time.Time) {
-	if a.demo || a.modal || a.quitting || a.syncing() || a.creating || a.renaming || a.fetchPage != "" {
+	if a.backgroundBusy(now) {
 		return
 	}
 	d := a.docs[a.active]
-	if d == nil || d.Page.InTrash || d.Page.Kind != "page" || a.needsSync(d.Page.ID) || now.Sub(a.remoteChecked[d.Page.ID]) < remoteRefreshInterval {
+	interval := max(remoteRefreshInterval, a.refreshDelay[a.active])
+	if now.Sub(a.lastActivity) >= 2*time.Minute {
+		interval = max(interval, 3*time.Minute)
+	}
+	if d == nil || d.Page.InTrash || d.Page.Kind != "page" || a.needsSync(d.Page.ID) || now.Sub(a.remoteChecked[d.Page.ID]) < interval {
 		return
 	}
 	a.fetchContent(d.Page, true)
+}
+
+func (a *app) backgroundBusy(now time.Time) bool {
+	if a.demo || a.modal || a.quitting || a.syncing() || a.creating || a.renaming || a.trashBusy || a.commentsSending() || a.fetchPage != "" || now.Before(a.backgroundUntil) {
+		return true
+	}
+	for id := range a.changed {
+		if a.needsSync(id) && !a.blocked[id] {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) backgroundResult(err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if err == nil {
+		a.backgroundFailures = 0
+		a.backgroundUntil = time.Time{}
+		return
+	}
+	a.backgroundFailures = min(a.backgroundFailures+1, 6)
+	a.backgroundUntil = time.Now().Add(min(15*time.Second<<(a.backgroundFailures-1), 5*time.Minute))
+}
+
+func (a *app) touchActivity() {
+	now := time.Now()
+	if now.Sub(a.lastActivity) >= 2*time.Minute {
+		delete(a.refreshDelay, a.active)
+		delete(a.remoteChecked, a.active)
+	}
+	a.lastActivity = now
 }
 
 func (a *app) onEdit() {
@@ -253,6 +291,8 @@ func (a *app) finishSyncSuccess(id string, request syncRequest, content notion.C
 	d.Dirty = d.Text != content.Markdown
 	d.Fetched = now
 	a.remoteChecked[id] = now
+	delete(a.refreshDelay, id)
+	a.backgroundResult(nil)
 	a.blocked[id] = false
 	if d.Dirty {
 		if a.changed[id].IsZero() {

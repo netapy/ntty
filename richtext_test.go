@@ -10,6 +10,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/rivo/uniseg"
+	"ntty/internal/notion"
 )
 
 const enhancedMarkdown = "# Héllo **bold** and *italic*\n\n<span underline=\"true\" discussion-urls=\"discussion://one\">underlined</span> <mention-page url=\"https://www.notion.so/12345678123442348234123456789abc\"/>\n<callout icon=\"💡\">Keep <br> metadata</callout>\n<empty-block/>\n- [x] café\n"
@@ -755,6 +756,60 @@ func TestRichEditorStatefulPlainTextDifferential(t *testing.T) {
 	}
 }
 
+func TestOrdinaryEditFastPathMatchesFullValidation(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260921))
+	source := strings.Repeat("ordinary paragraph text café\n", 4000)
+	r := newRichEditor()
+	r.SetText(source, false)
+	for step := 0; step < 128; step++ {
+		line := rng.Intn(len(r.lines))
+		start := 0
+		for i := 0; i < line; i++ {
+			start += len(r.lines[i].display()) + 1
+		}
+		start += rng.Intn(len(r.lines[line].display()) + 1)
+		start = textBoundary(r.visible, start)
+		inserted := []string{"x", "é", " ", "*", ""}[rng.Intn(5)]
+		end := start
+		if inserted == "" && end < lineEnd(r.visible, end) {
+			end = nextGrapheme(r.visible, end)
+		}
+
+		beforeSource, beforeVisible := r.source, r.visible
+		expected, ok := editRichAt(r.lines, beforeVisible, start, end, inserted)
+		wantVisible := beforeVisible[:start] + inserted + beforeVisible[end:]
+		if !ok || !r.validModel(expected, wantVisible) {
+			t.Fatalf("slow semantics rejected ordinary edit %d", step)
+		}
+		wantSource := richMarkdown(expected)
+		if !notion.PreservesProtectedObjects(beforeSource, wantSource) {
+			t.Fatalf("slow semantics rejected protected content at edit %d", step)
+		}
+
+		r.Replace(start, end, inserted)
+		if r.visible != wantVisible || r.source != wantSource {
+			t.Fatalf("edit %d differs from full validation", step)
+		}
+	}
+
+	for _, source := range []string{
+		"Before\n<unknown id=\"keep\"/>\nAfter",
+		`<mention-date start="2026-09-21"/>`,
+		"<table><tr><td>cell</td></tr></table>",
+		"![image](https://example.com/image.png)",
+		"{color=red}",
+	} {
+		protected := newRichEditor()
+		protected.SetText(source, false)
+		if protected.fastEdits {
+			t.Fatalf("structured document enabled the fast path: %q", source)
+		}
+	}
+	if !ordinaryRichDocument("Before\n<empty-block/>\nAfter") {
+		t.Fatal("ordinary Notion empty paragraph disabled the fast path")
+	}
+}
+
 func FuzzRichRoundTrip(f *testing.F) {
 	for _, seed := range []string{"", enhancedMarkdown, "## title\n- item\n> quote", "`a``b` &amp; <unknown x=\"1\"/>"} {
 		f.Add(seed)
@@ -776,6 +831,31 @@ func BenchmarkParseRichArticle(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		parseRich(source, nil)
+	}
+}
+
+func BenchmarkRichEditorType100KB(b *testing.B) {
+	source := strings.Repeat("ordinary paragraph text that stays plain\n", 2500)
+	for _, benchmark := range []struct {
+		name string
+		slow bool
+	}{{"FastPath", false}, {"FullValidation", true}} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			r := newRichEditor()
+			r.SetText(source, false)
+			pos := len("ordinary paragraph")
+			b.ReportAllocs()
+			for b.Loop() {
+				if benchmark.slow {
+					r.fastEdits = false
+				}
+				r.Replace(pos, pos, "x")
+				if benchmark.slow {
+					r.fastEdits = false
+				}
+				r.Replace(pos, pos+1, "")
+			}
+		})
 	}
 }
 

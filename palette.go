@@ -33,16 +33,40 @@ type blockMenu struct {
 	pos   int
 }
 
-func matches(label, query string) bool {
-	label = strings.ToLower(label)
-	compactLabel := strings.NewReplacer(" ", "", "-", "", "_", "").Replace(label)
-	for _, word := range strings.Fields(strings.ToLower(query)) {
-		compactWord := strings.NewReplacer("-", "", "_", "").Replace(word)
-		if !strings.Contains(label, word) && !strings.Contains(compactLabel, compactWord) {
-			return false
-		}
+var compactSearchLabel = strings.NewReplacer(" ", "", "-", "", "_", "")
+var compactSearchWord = strings.NewReplacer("-", "", "_", "")
+
+// Normalize each query once, and only compact a label when a literal match
+// fails. Rebuilding string replacers for every candidate is expensive.
+func searchMatcher(query string) func(string) bool {
+	words := strings.Fields(strings.ToLower(query))
+	compactWords := make([]string, len(words))
+	for i, word := range words {
+		compactWords[i] = compactSearchWord.Replace(word)
 	}
-	return true
+	return func(label string) bool {
+		if len(words) == 0 {
+			return true
+		}
+		label = strings.ToLower(label)
+		compactLabel, compacted := "", false
+		for i, word := range words {
+			if strings.Contains(label, word) {
+				continue
+			}
+			if !compacted {
+				compactLabel, compacted = compactSearchLabel.Replace(label), true
+			}
+			if !strings.Contains(compactLabel, compactWords[i]) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func matches(label, query string) bool {
+	return searchMatcher(query)(label)
 }
 
 func (a *app) openPalette(initial string) {
@@ -115,6 +139,7 @@ func (a *app) filterPalette(p *commandMenu) {
 	query := strings.TrimSpace(p.input.GetText())
 	commandsOnly := strings.HasPrefix(query, ">")
 	query = strings.TrimSpace(strings.TrimPrefix(query, ">"))
+	match := searchMatcher(query)
 	p.items = nil
 	p.list.Clear()
 	add := func(label string, run func()) {
@@ -123,37 +148,46 @@ func (a *app) filterPalette(p *commandMenu) {
 	}
 	finish := func(run func()) func() { return func() { a.closeModal(); run() } }
 	if !commandsOnly {
-		pages := mergePages(a.state.Pins, mergePages(a.state.Recents, a.state.Pages))
+		// Walk the sources in priority order without copying the workspace twice
+		// on every keystroke. Deduplicate IDs and resolve trash status in O(n).
+		sources := [][]notion.Page{a.state.Pins, a.state.Recents, a.state.Pages}
 		if query == p.remoteQuery {
-			pages = mergePages(p.remote, pages)
+			sources = append([][]notion.Page{p.remote}, sources...)
 		}
+		trashed := a.trashedPages()
+		seen := make(map[string]bool, len(a.state.Pages))
 		count := 0
-		for _, page := range pages {
-			if page.InTrash {
-				continue
+	pages:
+		for _, pages := range sources {
+			for _, page := range pages {
+				if seen[page.ID] {
+					continue
+				}
+				seen[page.ID] = true
+				if page.InTrash || trashed[canonicalID(page.ID)] {
+					continue
+				}
+				if !match(page.Title) {
+					continue
+				}
+				if query == "" && count >= 5 {
+					break pages
+				}
+				p := page
+				label := p.Title
+				if p.Kind == "data_source" {
+					label = "▦  " + label
+				}
+				add(label, finish(func() { a.open(p) }))
+				count++
 			}
-			if known, ok := a.knownPage(page.ID); ok && known.InTrash {
-				continue
-			}
-			if !matches(page.Title, query) {
-				continue
-			}
-			if query == "" && count >= 5 {
-				break
-			}
-			p := page
-			label := p.Title
-			if p.Kind == "data_source" {
-				label = "▦  " + label
-			}
-			add(label, finish(func() { a.open(p) }))
-			count++
 		}
 	}
 	commands := []menuItem{
 		{"New note", func() { a.newNote(false, false) }},
 		{"Toggle sidebar", a.toggleSidebar},
 		{"Trash · restore deleted pages", a.openTrash},
+		{"Pending writes", a.pendingWrites},
 		{"Narrower sidebar", func() { a.resizeSidebar(-2) }},
 		{"Wider sidebar", func() { a.resizeSidebar(2) }},
 		{"Recent pages", func() { a.sidebarFilter = ""; a.loadList("", "", false, false); a.ui.SetFocus(a.sidebarFocus()) }},
@@ -194,7 +228,7 @@ func (a *app) filterPalette(p *commandMenu) {
 	}
 	commands = append(commands, menuItem{"Help", a.help}, menuItem{"Quit", a.quit})
 	for _, command := range commands {
-		if matches(command.label, query) {
+		if match(command.label) {
 			add(command.label, finish(command.run))
 		}
 	}

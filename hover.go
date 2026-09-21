@@ -124,6 +124,18 @@ type breadcrumbView struct {
 	app *app
 }
 
+func (b *breadcrumbView) Draw(screen tcell.Screen) {
+	// This is one navigation line, not a scrolling TextView. Paint it once
+	// using the current rectangle, with no retained wrapping/scroll state.
+	b.Box.DrawForSubclass(screen, b)
+	x, y, width, height := b.GetInnerRect()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	b.app.renderBreadcrumb(width)
+	tview.Print(screen, b.GetText(false), x, y, width, tview.AlignLeft, tcell.ColorTeal)
+}
+
 func hoverAt(p tview.Primitive, x, y int) hoverRect {
 	if p == nil {
 		return hoverRect{}

@@ -12,6 +12,11 @@ import (
 
 type databaseCell struct{ row, column int }
 
+type databasePropertyCache struct {
+	raw    string
+	values []notion.Property
+}
+
 type databaseView struct {
 	source                  notion.Page
 	pane                    *tview.Flex
@@ -29,8 +34,11 @@ type databaseView struct {
 	cancel                  context.CancelFunc
 	native                  *tview.DropDown
 	views                   []notion.DatabaseView
+	details                 map[string]notion.DatabaseView
 	viewID, queryID         string
 	incomplete              bool
+	loaded, cacheMetadata   bool
+	properties              map[string]databasePropertyCache
 }
 
 var databaseModes = []string{"table", "board", "list", "gallery"}
@@ -60,7 +68,8 @@ func (a *app) openDatabaseSource(source notion.Page) {
 		filter:      tview.NewInputField().SetLabel("Find loaded rows  ").SetPlaceholder("Text, or Property: value"),
 		status:      tview.NewTextView().SetTextStyle(quiet).SetWrap(false),
 		modeButtons: map[string]*tview.Button{}, cells: map[databaseCell]notion.Page{},
-		mode: mode, group: a.state.DatabaseGroups[source.ID], order: a.state.DatabaseSorts[source.ID],
+		properties: map[string]databasePropertyCache{},
+		mode:       mode, group: a.state.DatabaseGroups[source.ID], order: a.state.DatabaseSorts[source.ID],
 	}
 	if view.order == "" {
 		view.order = "title-asc"
@@ -184,12 +193,24 @@ func (a *app) cycleDatabaseMode(view *databaseView) {
 	a.setDatabaseMode(view, "table")
 }
 
-func databaseGroupProperties(rows []notion.Page) []string {
+func (view *databaseView) propertyValues(page notion.Page) []notion.Property {
+	if cached, ok := view.properties[page.ID]; ok && cached.raw == page.PropertyData {
+		return cached.values
+	}
+	values := page.PropertyValues()
+	if view.properties == nil {
+		view.properties = map[string]databasePropertyCache{}
+	}
+	view.properties[page.ID] = databasePropertyCache{raw: page.PropertyData, values: values}
+	return values
+}
+
+func databaseGroupProperties(view *databaseView) []string {
 	seen := map[string]bool{}
 	priority := map[string]int{}
 	var result []string
-	for _, page := range rows {
-		for _, property := range page.PropertyValues() {
+	for _, page := range view.rows {
+		for _, property := range view.propertyValues(page) {
 			switch property.Type {
 			case "status", "select", "multi_select", "checkbox", "people", "created_by", "last_edited_by":
 				if !seen[property.Name] {
@@ -210,7 +231,7 @@ func databaseGroupProperties(rows []notion.Page) []string {
 }
 
 func (a *app) cycleDatabaseGroup(view *databaseView) {
-	properties := databaseGroupProperties(view.rows)
+	properties := databaseGroupProperties(view)
 	if len(properties) == 0 {
 		view.group = ""
 		a.message("This database has no groupable properties", false)
@@ -257,8 +278,8 @@ func (a *app) cycleDatabaseSort(view *databaseView) {
 	a.renderDatabase(view)
 }
 
-func propertyValue(page notion.Page, name string) notion.Property {
-	for _, property := range page.PropertyValues() {
+func propertyValue(properties []notion.Property, name string) notion.Property {
+	for _, property := range properties {
 		if property.Name == name {
 			return property
 		}
@@ -266,11 +287,11 @@ func propertyValue(page notion.Page, name string) notion.Property {
 	return notion.Property{Name: name}
 }
 
-func databaseProperties(rows []notion.Page) []string {
+func databaseProperties(view *databaseView) []string {
 	seen := map[string]bool{}
 	title := "Name"
-	for _, page := range rows {
-		for _, property := range page.PropertyValues() {
+	for _, page := range view.rows {
+		for _, property := range view.propertyValues(page) {
 			if property.Type == "title" {
 				title = property.Name
 				break
@@ -282,8 +303,8 @@ func databaseProperties(rows []notion.Page) []string {
 	}
 	result := []string{title}
 	seen[title] = true
-	for _, page := range rows {
-		for _, property := range page.PropertyValues() {
+	for _, page := range view.rows {
+		for _, property := range view.propertyValues(page) {
 			if property.Type == "title" {
 				continue
 			}
@@ -299,9 +320,9 @@ func databaseProperties(rows []notion.Page) []string {
 	return result
 }
 
-func databaseMetadata(page notion.Page, omit string) string {
+func databaseMetadata(view *databaseView, page notion.Page, omit string) string {
 	var values []string
-	for _, property := range page.PropertyValues() {
+	for _, property := range view.propertyValues(page) {
 		if property.Type == "title" || property.Name == omit || property.Text == "" {
 			continue
 		}
@@ -344,7 +365,7 @@ func (a *app) renderDatabase(view *databaseView) {
 	query := strings.ToLower(strings.TrimSpace(view.filter.GetText()))
 	rows := make([]notion.Page, 0, len(view.rows))
 	for _, page := range view.rows {
-		if databaseMatches(page, query) {
+		if databaseMatchesProperties(page.Title, view.propertyValues(page), query) {
 			rows = append(rows, page)
 		}
 	}
@@ -383,27 +404,31 @@ func (a *app) renderDatabase(view *databaseView) {
 	if view.incomplete {
 		loading += " · Notion result limit reached"
 	}
+	if view.loaded && view.cacheMetadata {
+		loading += " · cached metadata (r refreshes)"
+	}
 	view.status.SetText("  " + titleCase(view.mode) + " · " + itoa(len(rows)) + " of " + itoa(len(view.rows)) + " rows loaded" + loading + " · / find · n Notion views · v layout · g group · s sort")
 }
 
 func (a *app) renderDatabaseTable(view *databaseView, rows []notion.Page) {
-	properties := databaseProperties(view.rows)
+	properties := databaseProperties(view)
 	for column, property := range properties {
 		view.table.SetCell(0, column, a.databaseCell(view, 0, column, property, notion.Page{}).SetExpansion(1))
 	}
 	for row, page := range rows {
+		values := view.propertyValues(page)
 		for column, property := range properties {
 			text := page.Title
 			if column > 0 {
-				text = propertyValue(page, property).Text
+				text = propertyValue(values, property).Text
 			}
 			view.table.SetCell(row+1, column, a.databaseCell(view, row+1, column, text, page).SetExpansion(1))
 		}
 	}
 }
 
-func groupValues(page notion.Page, property string) []string {
-	value := propertyValue(page, property)
+func groupValues(view *databaseView, page notion.Page, property string) []string {
+	value := propertyValue(view.propertyValues(page), property)
 	if len(value.Values) > 0 {
 		return value.Values
 	}
@@ -414,7 +439,7 @@ func groupValues(page notion.Page, property string) []string {
 }
 
 func (a *app) renderDatabaseBoard(view *databaseView, rows []notion.Page) {
-	properties := databaseGroupProperties(view.rows)
+	properties := databaseGroupProperties(view)
 	validGroup := false
 	for _, property := range properties {
 		if property == view.group {
@@ -434,7 +459,7 @@ func (a *app) renderDatabaseBoard(view *databaseView, rows []notion.Page) {
 	}
 	groups, order := map[string][]notion.Page{}, []string{}
 	for _, page := range rows {
-		for _, group := range groupValues(page, view.group) {
+		for _, group := range groupValues(view, page, view.group) {
 			if _, ok := groups[group]; !ok {
 				order = append(order, group)
 			}
@@ -446,7 +471,7 @@ func (a *app) renderDatabaseBoard(view *databaseView, rows []notion.Page) {
 		view.table.SetCell(0, column, a.databaseCell(view, 0, column, group+"  "+itoa(len(groups[group])), notion.Page{}).SetExpansion(1))
 		for row, page := range groups[group] {
 			text := page.Title
-			if meta := databaseMetadata(page, view.group); meta != "" {
+			if meta := databaseMetadata(view, page, view.group); meta != "" {
 				text += " · " + meta
 			}
 			view.table.SetCell(row+1, column, a.databaseCell(view, row+1, column, text, page).SetExpansion(1))
@@ -458,7 +483,7 @@ func (a *app) renderDatabaseList(view *databaseView, rows []notion.Page) {
 	view.table.SetCell(0, 0, a.databaseCell(view, 0, 0, "Name", notion.Page{}).SetExpansion(1))
 	for row, page := range rows {
 		text := page.Title
-		if meta := databaseMetadata(page, ""); meta != "" {
+		if meta := databaseMetadata(view, page, ""); meta != "" {
 			text += "  ·  " + meta
 		}
 		view.table.SetCell(row+1, 0, a.databaseCell(view, row+1, 0, text, page).SetExpansion(1))
@@ -473,7 +498,7 @@ func (a *app) renderDatabaseGallery(view *databaseView, rows []notion.Page) {
 	for index, page := range rows {
 		row, column := index/columns+1, index%columns
 		text := "◇ " + page.Title
-		if meta := databaseMetadata(page, ""); meta != "" {
+		if meta := databaseMetadata(view, page, ""); meta != "" {
 			text += " · " + meta
 		}
 		view.table.SetCell(row, column, a.databaseCell(view, row, column, text, page).SetExpansion(1))
@@ -517,9 +542,16 @@ func (a *app) loadDatabase(view *databaseView, reset bool) {
 	generation := view.generation
 	cursor := view.cursor
 	viewID, queryID := view.viewID, view.queryID
+	cachedBackend, canCache := a.backend.(notion.CachedViewBackend)
 	if reset {
 		cursor = ""
 		queryID = ""
+		view.cacheMetadata = viewID != "" && !view.loaded && canCache
+	}
+	cacheMetadata := view.cacheMetadata
+	var cachedPages []notion.Page
+	if cacheMetadata {
+		cachedPages = append([]notion.Page(nil), a.state.Pages...)
 	}
 	a.renderDatabase(view)
 	go func() {
@@ -527,7 +559,11 @@ func (a *app) loadDatabase(view *databaseView, reset bool) {
 		var err error
 		var native notion.ViewListing
 		if viewID != "" {
-			native, err = a.backend.(notion.ViewBackend).QueryView(ctx, viewID, queryID, cursor)
+			if cacheMetadata {
+				native, err = cachedBackend.QueryViewCached(ctx, viewID, queryID, cursor, cachedPages)
+			} else {
+				native, err = a.backend.(notion.ViewBackend).QueryView(ctx, viewID, queryID, cursor)
+			}
 			listing = native.Listing
 		} else {
 			listing, err = a.backend.Query(ctx, view.source.ID, cursor)
@@ -544,13 +580,14 @@ func (a *app) loadDatabase(view *databaseView, reset bool) {
 			}
 			if reset {
 				view.rows = listing.Pages
+				view.properties = map[string]databasePropertyCache{}
 			} else {
 				view.rows = mergePages(view.rows, listing.Pages)
 			}
+			view.loaded = true
 			view.cursor = listing.Cursor
 			view.queryID, view.incomplete = native.QueryID, native.Incomplete
 			a.state.Pages = mergePages(listing.Pages, a.state.Pages)
-			a.state.People = mergePeople(a.state.People, peopleFromPages(listing.Pages))
 			a.persistState()
 			a.renderDatabase(view)
 		})
@@ -558,6 +595,10 @@ func (a *app) loadDatabase(view *databaseView, reset bool) {
 }
 
 func databaseMatches(page notion.Page, query string) bool {
+	return databaseMatchesProperties(page.Title, page.PropertyValues(), query)
+}
+
+func databaseMatchesProperties(title string, properties []notion.Property, query string) bool {
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
 		return true
@@ -565,9 +606,9 @@ func databaseMatches(page notion.Page, query string) bool {
 	name, value, scoped := strings.Cut(query, ":")
 	var values []string
 	if !scoped {
-		values = append(values, page.Title)
+		values = append(values, title)
 	}
-	for _, property := range page.PropertyValues() {
+	for _, property := range properties {
 		if !scoped || strings.EqualFold(property.Name, strings.TrimSpace(name)) {
 			values = append(values, property.Text)
 		}
@@ -576,6 +617,19 @@ func databaseMatches(page notion.Page, query string) bool {
 		query = strings.TrimSpace(value)
 	}
 	return len(values) > 0 && strings.Contains(strings.ToLower(strings.Join(values, " ")), query)
+}
+
+func (a *app) configureDatabaseNative(view *databaseView, native notion.DatabaseView) {
+	view.mode = "table"
+	for _, mode := range databaseModes {
+		if mode == native.Type {
+			view.mode = mode
+		}
+	}
+	view.group = native.Configuration.GroupBy.PropertyName
+	if view.mode != native.Type {
+		a.message(native.Type+" view: rows shown as a table; native filters and sorts retained", false)
+	}
 }
 
 func (a *app) loadDatabaseViews(view *databaseView) {
@@ -602,19 +656,46 @@ func (a *app) loadDatabaseViews(view *databaseView) {
 				view.viewID, view.queryID, view.cursor = "", "", ""
 				view.rows = nil
 				view.incomplete = false
+				view.loaded = false
 				view.order = "title-asc"
 				if index > 0 {
 					native := view.views[index-1]
-					view.viewID, view.order = native.ID, "native"
-					view.mode = "table"
-					for _, mode := range databaseModes {
-						if mode == native.Type {
-							view.mode = mode
-						}
+					cachedDetail, hasDetail := view.details[native.ID]
+					if hasDetail {
+						native = cachedDetail
 					}
-					view.group = native.Configuration.GroupBy.PropertyName
-					if view.mode != native.Type {
-						a.message(native.Type+" view: rows shown as a table; native filters and sorts retained", false)
+					view.viewID, view.order = native.ID, "native"
+					a.configureDatabaseNative(view, native)
+					if details, ok := a.backend.(notion.ViewDetailBackend); ok && !hasDetail {
+						if view.cancel != nil {
+							view.cancel()
+						}
+						view.generation++
+						generation := view.generation
+						ctx, cancel := context.WithCancel(a.ctx)
+						view.cancel = cancel
+						view.loading = true
+						a.renderDatabase(view)
+						go func(id string) {
+							detail, err := details.View(ctx, id)
+							a.ui.QueueUpdateDraw(func() {
+								if a.database != view || view.generation != generation || ctx.Err() != nil {
+									return
+								}
+								view.loading = false
+								if err != nil {
+									a.message("Notion view details unavailable: "+err.Error(), true)
+								} else {
+									if view.details == nil {
+										view.details = map[string]notion.DatabaseView{}
+									}
+									view.details[id] = detail
+									a.configureDatabaseNative(view, detail)
+								}
+								a.loadDatabase(view, true)
+							})
+						}(native.ID)
+						return
 					}
 				}
 				a.ui.SetFocus(view.table)

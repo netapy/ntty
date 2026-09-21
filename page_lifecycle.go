@@ -45,7 +45,7 @@ func (a *app) renamePageDialog(page notion.Page) {
 // active page, then visible sidebar entries; never infer deletion from absence
 // in a partial search response or from a transport/permission error.
 func (a *app) refreshPageMetadata(now time.Time) {
-	if a.demo || a.modal || a.quitting || a.syncing() || a.trashBusy || a.pageCheckBusy || a.fetching[a.active] {
+	if a.backgroundBusy(now) || a.listing || a.pageCheckBusy || now.Before(a.nextMetadata) {
 		return
 	}
 	if a.pageChecks == nil {
@@ -58,15 +58,23 @@ func (a *app) refreshPageMetadata(now time.Time) {
 		candidates = append([]notion.Page{d.Page}, candidates...)
 	}
 	for _, p := range candidates {
-		if p.Kind != "page" || p.InTrash || now.Sub(a.pageChecks[p.ID]) < 30*time.Second {
+		interval := 10 * time.Minute
+		if p.ID == a.active {
+			interval = time.Minute
+		}
+		id := canonicalID(p.ID)
+		if p.Kind != "page" || p.InTrash || now.Sub(a.pageChecks[id]) < interval {
 			continue
 		}
-		a.pageChecks[p.ID] = now
+		a.pageChecks[id] = now
+		// ponytail: one global budget, rather than a request scheduler.
+		a.nextMetadata = now.Add(15 * time.Second)
 		a.pageCheckBusy = true
 		go func() {
 			updated, err := a.backend.Page(a.ctx, p.ID)
 			a.ui.QueueUpdateDraw(func() {
 				a.pageCheckBusy = false
+				a.backgroundResult(err)
 				if err == nil {
 					a.applyPageMetadata(updated)
 				}
@@ -78,6 +86,10 @@ func (a *app) refreshPageMetadata(now time.Time) {
 
 func (a *app) applyPageMetadata(page notion.Page) {
 	if page.ID == "" {
+		return
+	}
+	old, known := a.knownPage(page.ID)
+	if known && old == page {
 		return
 	}
 	a.state.Pages = mergePages([]notion.Page{page}, a.state.Pages)
@@ -99,7 +111,20 @@ func (a *app) applyPageMetadata(page notion.Page) {
 	for key := range a.listCache {
 		delete(a.listCache, key)
 	}
-	a.resolvedPaths = nil
+	if !known || old.ParentID != page.ParentID || old.ParentKind != page.ParentKind || old.Title != page.Title || old.InTrash != page.InTrash {
+		for id, path := range a.resolvedPaths {
+			for _, ancestor := range path {
+				if canonicalID(ancestor.ID) == canonicalID(page.ID) {
+					delete(a.resolvedPaths, id)
+					break
+				}
+			}
+		}
+		if a.breadcrumbCancel != nil {
+			a.breadcrumbCancel()
+		}
+	}
+	a.persistState()
 	if page.ID == a.active {
 		a.setTitle(page.Title)
 		a.setBreadcrumb(page)
@@ -109,7 +134,6 @@ func (a *app) applyPageMetadata(page notion.Page) {
 			a.message("Page moved to Trash · local draft retained · page menu can restore it", true)
 		}
 	}
-	a.persistState()
 	a.rebuildList()
 }
 

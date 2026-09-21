@@ -96,7 +96,7 @@ func main() {
 			fatal(err)
 		}
 		fmt.Printf("Connected. %d recent pages/data sources; more=%v.\n", len(l.Pages), l.Cursor != "")
-		fmt.Printf("Drafts: %s\nRequests: serialized, at least 650ms apart. Autosave: 3s idle; clean active pages refresh every 5s; transient failures retry safely.\n", s.Dir)
+		fmt.Printf("Drafts: %s\nRequests: serialized, at least 650ms apart. Autosave: 3s idle; clean-page refresh adapts to activity and changes; transient failures retry safely.\n", s.Dir)
 		return
 	}
 	a := newApp(backend, s, state, drafts, *parent, *demo)

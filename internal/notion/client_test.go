@@ -11,6 +11,31 @@ import (
 	"time"
 )
 
+func TestBackgroundReadBackoffReleasesRequestGate(t *testing.T) {
+	c := NewClient()
+	c.interval = time.Millisecond
+	failed := make(chan struct{})
+	c.run = func(_ context.Context, args []string, _ []byte) ([]byte, error) {
+		if strings.Contains(args[1], "background") {
+			close(failed)
+			return nil, errors.New("503 unavailable")
+		}
+		return []byte(`{"object":"page_markdown","markdown":"ready"}`), nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := c.Read(ctx, "background"); done <- err }()
+	<-failed
+	foreground, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	_, err := c.Read(foreground, "foreground")
+	cancel()
+	<-done
+	if err != nil {
+		t.Fatalf("foreground request blocked by retry sleep: %v", err)
+	}
+}
+
 func TestProtectedPageEdgeInsertionReconcilesLostResponse(t *testing.T) {
 	for _, position := range []string{"start", "end"} {
 		t.Run(position, func(t *testing.T) {

@@ -96,3 +96,59 @@ func TestViewQueryRejectsBrokenPaginationAndRowErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestViewsUsesListMetadataWithoutDetailRequests(t *testing.T) {
+	c := NewClient()
+	c.interval = 0
+	c.run = func(_ context.Context, args []string, _ []byte) ([]byte, error) {
+		if args[1] != "v1/views?data_source_id=source&page_size=100" {
+			t.Fatalf("unexpected detail request: %s", args[1])
+		}
+		return []byte(`{"results":[{"id":"v1","name":"Table","type":"table"},{"id":"v2","name":"Board","type":"board"}],"has_more":false}`), nil
+	}
+	views, err := c.Views(context.Background(), "source")
+	if err != nil || len(views) != 2 || views[0].Name != "Table" || views[1].Type != "board" {
+		t.Fatalf("views: %+v %v", views, err)
+	}
+}
+
+func TestViewQueryCachedPreservesOrderAndRefreshesMisses(t *testing.T) {
+	c := NewClient()
+	c.interval = 0
+	var fetched []string
+	c.run = func(_ context.Context, args []string, _ []byte) ([]byte, error) {
+		if args[1] == "v1/views/view/queries" {
+			return []byte(`{"id":"query","results":[{"id":"cached"},{"id":"miss"},{"id":"changed","last_edited_time":"new"}],"has_more":false}`), nil
+		}
+		id := strings.TrimPrefix(args[1], "v1/pages/")
+		fetched = append(fetched, id)
+		return []byte(`{"id":"` + id + `","object":"page","last_edited_time":"new","properties":{"Name":{"type":"title","title":[{"plain_text":"` + id + `"}]}}}`), nil
+	}
+	result, err := c.QueryViewCached(context.Background(), "view", "", "", []Page{{ID: "changed", Title: "old", Edited: "old"}, {ID: "cached", Title: "cached"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{result.Pages[0].ID, result.Pages[1].ID, result.Pages[2].ID}; strings.Join(got, ",") != "cached,miss,changed" {
+		t.Fatalf("order: %v", got)
+	}
+	if strings.Join(fetched, ",") != "miss,changed" || result.Pages[2].Title != "changed" {
+		t.Fatalf("fetched %v, pages %+v", fetched, result.Pages)
+	}
+}
+
+func TestViewQueryCachedHonorsCancellationBetweenQueryAndRows(t *testing.T) {
+	c := NewClient()
+	c.interval = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	c.run = func(_ context.Context, args []string, _ []byte) ([]byte, error) {
+		if args[1] == "v1/views/view/queries" {
+			cancel()
+			return []byte(`{"id":"query","results":[{"id":"cached"}],"has_more":false}`), nil
+		}
+		t.Fatalf("must not fetch a row after cancellation")
+		return nil, nil
+	}
+	if _, err := c.QueryViewCached(ctx, "view", "", "", []Page{{ID: "cached"}}); err != context.Canceled {
+		t.Fatalf("error: %v", err)
+	}
+}

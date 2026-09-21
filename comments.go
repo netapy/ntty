@@ -26,6 +26,7 @@ type pageComments struct {
 	fetched    time.Time
 	incomplete bool
 	drafts     map[string]string // Empty discussion ID means a new page comment.
+	pending    map[string]string // Target to durable attempted intent ID.
 	target     string
 	sending    bool
 	notice     string
@@ -67,8 +68,9 @@ func (a *app) comments() {
 	}
 	p := a.commentState.pages[a.active]
 	if p == nil {
-		p = &pageComments{drafts: map[string]string{}}
+		p = &pageComments{drafts: map[string]string{}, pending: map[string]string{}}
 		a.commentState.pages[a.active] = p
+		a.loadCommentDrafts(a.active, p)
 	}
 	v := &commentsView{backend: backend, pageID: a.active, state: p}
 	v.list = tview.NewList().ShowSecondaryText(true).SetHighlightFullLine(false).SetMainTextStyle(tcell.StyleDefault).SetSecondaryTextStyle(quiet).SetSelectedStyle(selection)
@@ -98,6 +100,7 @@ func (a *app) comments() {
 	v.input.SetChangedFunc(func() {
 		if !v.setting {
 			p.drafts[p.target] = v.input.GetText()
+			a.drafts.PutCommentDraft(v.pageID, p.target, v.input.GetText())
 			a.updateCommentControls(v)
 		}
 	})
@@ -164,6 +167,27 @@ func (a *app) comments() {
 	a.renderComments(v)
 	if !p.sending && (p.fetched.IsZero() || time.Since(p.fetched) > time.Minute) {
 		a.loadComments(v, false)
+	}
+}
+
+func (a *app) loadCommentDrafts(pageID string, p *pageComments) {
+	intents, err := a.store.Intents()
+	if err != nil {
+		p.notice = "Draft recovery: " + err.Error()
+		return
+	}
+	if p.drafts == nil {
+		p.drafts = map[string]string{}
+	}
+	p.pending = map[string]string{}
+	for _, intent := range intents {
+		if intent.Kind != "comment" || intent.PageID != pageID {
+			continue
+		}
+		p.drafts[intent.DiscussionID] = intent.Body
+		if intent.Attempted {
+			p.pending[intent.DiscussionID] = intent.ID
+		}
 	}
 }
 
@@ -306,16 +330,19 @@ func (v *commentsView) canReply() bool {
 
 func (a *app) updateCommentControls(v *commentsView) {
 	p := v.state
+	_, unresolved := p.pending[p.target]
 	busy := v.loading || p.sending
-	v.input.SetDisabled(p.sending)
+	v.input.SetDisabled(p.sending || unresolved)
 	v.more.SetDisabled(busy || p.cursor == "")
 	v.refresh.SetDisabled(busy)
-	v.send.SetDisabled(busy || !v.canReply() || strings.TrimSpace(p.drafts[p.target]) == "")
+	v.send.SetDisabled(busy || unresolved || !v.canReply() || strings.TrimSpace(p.drafts[p.target]) == "")
 	v.send.SetLabel("Send")
 	switch {
 	case p.sending:
 		v.send.SetLabel("Sending…")
 		v.status.SetText("Sending… Your draft is kept until Notion confirms.")
+	case unresolved:
+		v.status.SetText("Unresolved send retained. Inspect it in Pending writes; mark sent or unlock before retrying.")
 	case v.loading:
 		v.status.SetText("Loading comments…")
 	case p.notice != "":
@@ -443,6 +470,18 @@ func (a *app) sendComment(v *commentsView) {
 	if target == "" {
 		pageID = v.pageID
 	}
+	if err := a.drafts.Flush(commentDraftID(v.pageID, target)); err != nil {
+		p.notice = "Draft: " + err.Error()
+		a.updateCommentControls(v)
+		return
+	}
+	intent, err := a.store.BeginComment(v.pageID, target, text)
+	if err != nil {
+		p.notice = "Send blocked: " + err.Error()
+		a.updateCommentControls(v)
+		return
+	}
+	p.pending[target] = intent.ID
 	p.sending = true
 	a.updateCommentControls(v)
 	go func() {
@@ -450,16 +489,21 @@ func (a *app) sendComment(v *commentsView) {
 		a.ui.QueueUpdateDraw(func() {
 			p.sending = false
 			if err != nil {
-				p.notice = "Send: " + err.Error() + " · draft kept; refresh/check Notion before retrying"
+				p.notice = "Send: " + err.Error() + " · unresolved write retained; inspect Pending writes"
 				if a.quitting {
 					a.quitting = false
-					a.message("Comment not sent; draft kept in Comments for this session", true)
+					a.message("Comment outcome unknown; durable draft kept in Pending writes", true)
 				}
 			} else {
-				if p.drafts[target] == text {
+				if completeErr := a.store.CompleteIntent(intent.ID); completeErr != nil {
+					p.notice = "Sent, but local pending record could not be cleared: " + completeErr.Error()
+				} else if p.drafts[target] == text {
 					delete(p.drafts, target)
+					delete(p.pending, target)
 				}
-				p.notice = "Sent to Notion"
+				if _, retained := p.pending[target]; !retained {
+					p.notice = "Sent to Notion"
+				}
 				if comment.DiscussionID != "" {
 					p.items = mergeComments(p.items, []notion.Comment{comment})
 					p.target = comment.DiscussionID

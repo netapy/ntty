@@ -40,6 +40,7 @@ type richEditor struct {
 	notice                               func(string)
 	rows                                 []richRow
 	layoutWidth                          int
+	fastEdits                            bool
 	anchor, head                         int
 	undo, redo                           []richSnapshot
 	lastEdit                             time.Time
@@ -65,6 +66,7 @@ func (r *richEditor) SetText(text string, end bool) *richEditor {
 	r.lines = parseRich(text, r.label)
 	r.source = text
 	r.visible = richDisplay(r.lines)
+	r.fastEdits = ordinaryRichDocument(text)
 	r.rows = nil
 	r.TextArea.SetText(r.visible, end)
 	r.anchor, r.head = 0, 0
@@ -93,6 +95,7 @@ func (r *richEditor) Rebase(text string) bool {
 		return false
 	}
 	r.lines, r.source = lines, text
+	r.fastEdits = ordinaryRichDocument(text)
 	r.rows = nil
 	return true
 }
@@ -168,6 +171,7 @@ func (r *richEditor) restore(s richSnapshot) {
 	r.lines = parseRich(s.text, r.label)
 	r.source = s.text
 	r.visible = richDisplay(r.lines)
+	r.fastEdits = ordinaryRichDocument(s.text)
 	r.rows = nil
 	r.TextArea.SetText(r.visible, false)
 	r.Select(s.anchor, s.head)
@@ -224,6 +228,7 @@ func (r *richEditor) ensureCursor() {
 func (r *richEditor) updateModel() {
 	r.source = richMarkdown(r.lines)
 	r.visible = richDisplay(r.lines)
+	r.fastEdits = ordinaryRichDocument(r.source)
 	r.rows = nil
 	r.visualRow = -1
 	row, _ := r.GetOffset()
@@ -233,8 +238,47 @@ func (r *richEditor) updateModel() {
 }
 
 func (r *richEditor) validModel(lines []richLine, visible string) bool {
-	parsed := parseRich(richMarkdown(lines), r.label)
-	return richDisplay(parsed) == visible || strings.Contains(richMarkdown(lines), "<table") && sameRichContent(lines, parsed)
+	markdown := richMarkdown(lines)
+	parsed := parseRich(markdown, r.label)
+	return richDisplay(parsed) == visible || strings.Contains(markdown, "<table") && sameRichContent(lines, parsed)
+}
+
+// fastValidEdit proves that a single ordinary line still has exactly the
+// display produced by the full parser. Documents containing protected objects,
+// structural edits and styled/atomic lines keep the full-document checks.
+func (r *richEditor) fastValidEdit(before, after []richLine, old, visible string, start, end int, inserted string) bool {
+	if !r.fastEdits || r.typing != nil || strings.Contains(inserted, "\n") || len(before) != len(after) {
+		return false
+	}
+	from, _ := linePoint(old, start)
+	to, _ := linePoint(old, end)
+	if from != to || from >= len(before) || !ordinaryRichLine(before[from]) || !ordinaryRichLine(after[from]) {
+		return false
+	}
+	parsed := parseRich(after[from].raw, r.label)
+	lineStart := lineStart(visible, start)
+	lineEnd := lineEnd(visible, lineStart)
+	return len(parsed) == 1 && richDisplay(parsed) == visible[lineStart:lineEnd] && ordinaryRichDocument(after[from].raw)
+}
+
+// The preservation scanner's protected forms all start with one of these
+// tokens. Stay deliberately conservative; empty-block is ordinary paragraph
+// storage and is the only Notion tag admitted to the fast path.
+func ordinaryRichDocument(source string) bool {
+	source = strings.ReplaceAll(strings.ReplaceAll(source, "<empty-block/>", ""), "<empty-block />", "")
+	return !strings.ContainsAny(source, "<{") && !strings.Contains(source, "![")
+}
+
+func ordinaryRichLine(line richLine) bool {
+	if line.prefix != "" || line.visual != "" || line.heading != 0 || line.literal || strings.Contains(line.raw, "\n") {
+		return false
+	}
+	for _, c := range line.chars {
+		if c.atom != nil || c.marks != 0 || len(c.wrappers) != 0 || c.link != "" || c.code {
+			return false
+		}
+	}
+	return true
 }
 
 // Table borders/padding may reflow after typing; all text and source atoms
@@ -314,7 +358,12 @@ func (r *richEditor) transact(fn func(), group bool) {
 	if ok {
 		lines, ok = editRichAt(r.lines, old, start, end, inserted)
 	}
-	if !ok || !r.validModel(lines, text) || !notion.PreservesProtectedObjects(r.source, richMarkdown(lines)) {
+	fast := ok && r.fastValidEdit(r.lines, lines, old, text, start, end, inserted)
+	source := ""
+	if ok {
+		source = richMarkdown(lines)
+	}
+	if !ok || !fast && (!r.validModel(lines, text) || !notion.PreservesProtectedObjects(r.source, source)) {
 		r.TextArea.SetText(old, false)
 		r.Select(before.anchor, before.head)
 		r.SetOffset(before.row, 0)
@@ -325,7 +374,10 @@ func (r *richEditor) transact(fn func(), group bool) {
 	}
 	r.lines = lines
 	r.visible = text
-	r.source = richMarkdown(lines)
+	r.source = source
+	if !fast {
+		r.fastEdits = ordinaryRichDocument(source)
+	}
 	r.rows = nil
 	_, _, r.head = r.TextArea.GetSelection()
 	r.anchor = r.head
@@ -354,8 +406,10 @@ func (r *richEditor) transact(fn func(), group bool) {
 		r.head = mapTextOffset(old, r.visible, r.head)
 		r.anchor = r.head
 	}
-	r.TextArea.SetText(r.visible, false)
-	r.syncNativeSelection()
+	if !fast {
+		r.TextArea.SetText(r.visible, false)
+		r.syncNativeSelection()
+	}
 	r.record(before, group)
 	r.ensureCursor()
 }

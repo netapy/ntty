@@ -168,14 +168,21 @@ func TestCommentsMoreDraftsAndFailedSend(t *testing.T) {
 	release <- result{err: errors.New("offline")}
 	await(func() bool { return !v.state.sending })
 	a.ui.QueueUpdateDraw(func() {
-		if v.input.GetText() != "reply draft café" || v.input.GetDisabled() || sends.Load() != 1 || a.quitting || !strings.Contains(v.status.GetText(false), "draft kept") {
-			t.Error("failed send lost draft, stayed disabled, or retried automatically")
+		if v.input.GetText() != "reply draft café" || !v.input.GetDisabled() || sends.Load() != 1 || a.quitting || !strings.Contains(v.status.GetText(false), "Unresolved send retained") {
+			t.Error("failed send lost its durable lock or retried automatically")
 		}
 		a.closeModal()
 		a.comments()
 		v = a.commentState.view
 		if v.input.GetText() != "reply draft café" {
 			t.Error("failed draft did not survive reopening")
+		}
+		a.sendComment(v)
+		if sends.Load() != 1 {
+			t.Error("unresolved send was posted a second time")
+		}
+		if err := a.store.UnlockIntent(v.state.pending[v.state.target]); err != nil {
+			t.Fatal(err)
 		}
 		a.sendComment(v)
 	})

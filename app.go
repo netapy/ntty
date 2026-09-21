@@ -37,6 +37,13 @@ type app struct {
 	statusExpanded, statusImportant             bool
 	pageCheckBusy, trashBusy                    bool
 	pageChecks                                  map[string]time.Time
+	nextMetadata                                time.Time
+	pageIndex                                   map[string]int
+	peopleProperties                            map[string]string
+	refreshDelay                                map[string]time.Duration
+	backgroundUntil                             time.Time
+	backgroundFailures                          int
+	lastActivity                                time.Time
 	demo                                        bool
 	viewStates                                  map[string]pageView
 	back, forward                               []notion.Page
@@ -64,6 +71,7 @@ type app struct {
 	sidebarWidth, sidebarHeight                 int
 	root                                        *tview.Flex
 	sidebarExpanded                             bool
+	workspaceTruncated                          bool
 	backend                                     notion.Backend
 	store                                       *store.Store
 	drafts                                      *draftWriter
@@ -104,6 +112,8 @@ func newApp(backend notion.Backend, s *store.Store, state store.State, drafts []
 	ctx, cancelContext := context.WithCancel(context.Background())
 	a := &app{ui: tview.NewApplication(), backend: backend, store: s, state: state, docs: map[string]*notion.Doc{}, changed: map[string]time.Time{}, blocked: map[string]bool{}, draftNotices: map[string]string{}, fetching: map[string]bool{}, remoteChecked: map[string]time.Time{}, parent: parent, ctx: ctx, listCache: map[string]cachedList{}, demo: demo, viewStates: map[string]pageView{}, treeExpanded: map[string]bool{}}
 	a.reducedMotion = os.Getenv("NTTY_REDUCED_MOTION") == "1"
+	a.lastActivity = time.Now()
+	a.refreshDelay = map[string]time.Duration{}
 	for _, id := range state.ExpandedPages {
 		a.treeExpanded[canonicalID(id)] = true
 	}
@@ -219,10 +229,6 @@ func newApp(backend notion.Backend, s *store.Store, state store.State, drafts []
 	}), 1, 0, false).AddItem(nil, 1, 0, false)
 	a.breadcrumb = &breadcrumbView{TextView: tview.NewTextView().SetWrap(false), app: a}
 	a.breadcrumb.SetMouseCapture(a.breadcrumbMouse)
-	a.breadcrumb.SetDrawFunc(func(_ tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		a.renderBreadcrumb(width)
-		return x, y, width, height
-	})
 	a.breadcrumb.SetTextStyle(accent)
 	a.statusIcon = a.textAction("·", func() {
 		a.statusExpanded = !a.statusExpanded
@@ -261,7 +267,7 @@ func newApp(backend notion.Backend, s *store.Store, state store.State, drafts []
 			if a.sidebarWidth != sideWidth || a.sidebarHeight != height {
 				a.sidebarWidth = sideWidth
 				a.sidebarHeight = height
-				a.rebuildList()
+				a.renderSidebar(sidebarSelection(a.favorites, a.favoritePages), sidebarSelection(a.recents, a.recentPages), sidebarSelection(a.list, a.visible))
 			}
 			divider.SetText(strings.Repeat("│\n", height))
 			padding := 5 // Matches the 3-cell sidebar toggle + 2-cell breadcrumb inset.
@@ -278,6 +284,11 @@ func newApp(backend notion.Backend, s *store.Store, state store.State, drafts []
 	a.layers = tview.NewPages().AddPage("main", root, true, true)
 	a.ui.SetRoot(a.layers, true).EnableMouse(true).EnablePaste(true).SetInputCapture(a.keys)
 	installHover(a.ui, a.layers)
+	mouseCapture := a.ui.GetMouseCapture()
+	a.ui.SetMouseCapture(func(e *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
+		a.touchActivity()
+		return mouseCapture(e, action)
+	})
 	a.title.SetText("Notebook")
 	a.listed = state.Pages
 	a.rebuildList()
@@ -591,7 +602,7 @@ func (a *app) run() error {
 // Content gets the first request through the serialized Notion client.
 // Workspace indexing is background work and must not delay opening a page.
 func (a *app) startWorkspaceRefresh() {
-	if a.startupListPending && a.fetchPage == "" && !a.syncing() {
+	if a.startupListPending && a.fetchPage == "" && !a.syncing() && !time.Now().Before(a.backgroundUntil) {
 		a.loadList("", "", false, false)
 	}
 }
@@ -682,23 +693,33 @@ func (a *app) updateStatusIcon() {
 }
 
 func (a *app) persistState() {
-	a.state.People = mergePeople(a.state.People, peopleFromPages(a.state.Pages))
-	if err := a.store.SaveState(a.state); err != nil {
-		a.message("Local state: "+err.Error(), true)
+	a.indexPages()
+	a.drafts.PutState(a.state)
+}
+
+func (a *app) indexPages() {
+	if a.pageIndex == nil {
+		a.pageIndex = make(map[string]int, len(a.state.Pages))
+		a.peopleProperties = make(map[string]string)
+	}
+	clear(a.pageIndex)
+	var people []notion.Person
+	for i := len(a.state.Pages) - 1; i >= 0; i-- {
+		p := a.state.Pages[i]
+		a.pageIndex[canonicalID(p.ID)] = i
+		if a.peopleProperties[p.ID] != p.PropertyData {
+			a.peopleProperties[p.ID] = p.PropertyData
+			for _, property := range p.PropertyValues() {
+				people = append(people, property.People...)
+			}
+		}
+	}
+	if len(people) > 0 {
+		a.state.People = mergePeople(a.state.People, people)
 	}
 }
 
-func (a *app) rebuildList() {
-	selected := func(list *tview.List, pages []notion.Page) string {
-		if i := list.GetCurrentItem(); i >= 0 && i < len(pages) {
-			return pages[i].ID
-		}
-		return ""
-	}
-	favoriteSelected := selected(a.favorites, a.favoritePages)
-	recentSelected := selected(a.recents, a.recentPages)
-	workspaceSelected := selected(a.list, a.visible)
-
+func (a *app) trashedPages() map[string]bool {
 	// Build once per refresh rather than scanning the entire workspace for
 	// each row. Preserve knownPage's precedence: open docs, pages, then pins.
 	trashed := make(map[string]bool, len(a.state.Pages))
@@ -710,6 +731,23 @@ func (a *app) rebuildList() {
 	for id, doc := range a.docs {
 		trashed[canonicalID(id)] = doc.Page.InTrash
 	}
+	return trashed
+}
+
+func sidebarSelection(list *tview.List, pages []notion.Page) string {
+	if i := list.GetCurrentItem(); i >= 0 && i < len(pages) {
+		return pages[i].ID
+	}
+	return ""
+}
+
+func (a *app) rebuildList() {
+	a.indexPages()
+	favoriteSelected := sidebarSelection(a.favorites, a.favoritePages)
+	recentSelected := sidebarSelection(a.recents, a.recentPages)
+	workspaceSelected := sidebarSelection(a.list, a.visible)
+
+	trashed := a.trashedPages()
 	query := strings.ToLower(a.sidebarFilter)
 	filter := func(p notion.Page) bool {
 		if p.InTrash || trashed[canonicalID(p.ID)] {
@@ -753,16 +791,18 @@ func (a *app) rebuildList() {
 		a.visible = append(a.visible, p)
 	}
 	hiddenWorkspace := !a.sidebarExpanded && a.sidebarFilter == "" && a.query == "" && a.container == "" && len(a.visible) > 20
+	a.workspaceTruncated = hiddenWorkspace
 	if hiddenWorkspace {
 		a.visible = a.visible[:20]
 	}
 	normalWorkspace := a.sidebarFilter == "" && a.query == "" && a.container == "" && !a.demo
 	if normalWorkspace {
 		roots := append([]notion.Page{}, a.visible...)
-		children := map[string][]notion.Page{}
-		for _, p := range a.state.Pages {
+		children := map[string][]int{}
+		for i, p := range a.state.Pages {
 			if p.ParentKind == "page_id" && p.ParentID != "" && filter(p) {
-				children[canonicalID(p.ParentID)] = append(children[canonicalID(p.ParentID)], p)
+				id := canonicalID(p.ParentID)
+				children[id] = append(children[id], i)
 			}
 		}
 		a.visible = nil
@@ -784,7 +824,7 @@ func (a *app) rebuildList() {
 			}
 			next[id] = true
 			for _, child := range children[id] {
-				appendPage(child, depth+1, next)
+				appendPage(a.state.Pages[child], depth+1, next)
 			}
 		}
 		for _, root := range roots {
@@ -797,7 +837,13 @@ func (a *app) rebuildList() {
 		}
 	}
 
+	a.renderSidebar(favoriteSelected, recentSelected, workspaceSelected)
+}
+
+func (a *app) renderSidebar(favoriteSelected, recentSelected, workspaceSelected string) {
+	normalWorkspace := a.sidebarFilter == "" && a.query == "" && a.container == "" && !a.demo
 	render := func(list *tview.List, pages []notion.Page, selected string, tree bool) {
+		row, column := list.GetOffset()
 		list.Clear()
 		for i, p := range pages {
 			marker, suffix := "  ", ""
@@ -831,6 +877,7 @@ func (a *app) rebuildList() {
 				list.SetCurrentItem(i)
 			}
 		}
+		list.SetOffset(row, column)
 	}
 	render(a.favorites, a.favoritePages, favoriteSelected, false)
 	render(a.recents, a.recentPages, recentSelected, false)
@@ -865,7 +912,7 @@ func (a *app) rebuildList() {
 	}
 	a.sidebar.ResizeItem(a.list, 0, btoi(!a.state.WorkspaceClosed || !showGroups))
 	a.sidebar.ResizeItem(a.more, btoi(!a.state.WorkspaceClosed || !showGroups), 0)
-	if hiddenWorkspace {
+	if a.workspaceTruncated {
 		a.more.SetText("  Show all…")
 	} else if a.cursor != "" {
 		a.more.SetText("  More…")
@@ -1002,6 +1049,7 @@ func (a *app) scanWorkspace(ctx context.Context, gen int, known []notion.Page) {
 			if gen != a.listGen {
 				return
 			}
+			a.backgroundResult(err)
 			a.listing = false
 			a.listed = mergePages(found, known)
 			a.cursor = cursor
@@ -1016,6 +1064,7 @@ func (a *app) scanWorkspace(ctx context.Context, gen int, known []notion.Page) {
 		if gen != a.listGen {
 			return
 		}
+		a.backgroundResult(nil)
 		a.listing = false
 		a.query, a.container = "", ""
 		a.listed = found
@@ -1071,6 +1120,13 @@ func (a *app) loadList(query, container string, more, force bool) {
 	knownRoots := workspacePages(a.state.Pages)
 	workspace := query == "" && container == "" && !a.demo
 	fullWorkspaceScan := workspace && !more && (force || a.state.WorkspaceIndexed.IsZero() || time.Since(a.state.WorkspaceIndexed) >= 24*time.Hour)
+	if workspace && !more && !force && !fullWorkspaceScan {
+		a.listing = false
+		a.query, a.container, a.cursor = "", "", ""
+		a.listed = knownRoots
+		a.rebuildList()
+		return
+	}
 	if fullWorkspaceScan {
 		a.query, a.container = "", ""
 		a.message("Indexing accessible workspace roots…", false)
@@ -1126,6 +1182,8 @@ func (a *app) loadList(query, container string, more, force bool) {
 }
 
 func (a *app) open(p notion.Page) {
+	a.touchActivity()
+	delete(a.refreshDelay, p.ID)
 	if known, ok := a.knownPage(p.ID); ok && known.InTrash {
 		a.openPageMenu(known)
 		return
@@ -1213,6 +1271,9 @@ func (a *app) fetch(p notion.Page) {
 }
 
 func (a *app) fetchContent(p notion.Page, quiet bool) {
+	if !quiet {
+		delete(a.refreshDelay, p.ID)
+	}
 	a.cancelFetch()
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.fetchCancel = cancel
@@ -1237,9 +1298,11 @@ func (a *app) fetchContent(p notion.Page, quiet bool) {
 			if sequence != a.fetchSeq {
 				return
 			}
+			a.backgroundResult(err)
+			a.remoteChecked[p.ID] = time.Now()
 			// Parent discovery can take several requests; start it only after
 			// the document read, using cached breadcrumbs in the meantime.
-			if a.active == p.ID {
+			if err == nil && a.active == p.ID {
 				a.resolveBreadcrumb(p)
 			}
 			delete(a.fetching, p.ID)
@@ -1271,11 +1334,13 @@ func (a *app) fetchContent(p notion.Page, quiet bool) {
 				return
 			}
 			if old := a.docs[p.ID]; old != nil && old.Base.Markdown == c.Markdown && old.Base.Editable() == c.Editable() {
+				a.refreshDelay[p.ID] = min(max(15*time.Second, a.refreshDelay[p.ID]*2), time.Minute)
 				old.Base = c
 				old.Text = c.Markdown
 				old.Fetched = time.Now()
 				return
 			}
+			delete(a.refreshDelay, p.ID)
 			if err := a.drafts.Flush(p.ID); err != nil {
 				a.message("Local draft: "+err.Error(), true)
 				return
@@ -1496,6 +1561,7 @@ func (a *app) refresh() {
 }
 
 func (a *app) keys(e *tcell.EventKey) *tcell.EventKey {
+	a.touchActivity()
 	commentInput := a.commentState.view != nil && a.ui.GetFocus() == a.commentState.view.input
 	switch a.ui.GetFocus().(type) {
 	case *tview.InputField, *tview.TextArea:
@@ -1747,6 +1813,7 @@ func (a *app) newNote(copyText, child bool) {
 			title = d.Page.Title + " (copy)"
 		}
 	}
+	parent, title, text = a.recoverCreate(parent, title, text)
 	f := tview.NewForm().SetButtonStyle(quiet).SetButtonActivatedStyle(selection).AddInputField("Title", title, 38, nil, nil).AddInputField("Parent", parent, 38, nil, nil)
 	f.SetBorder(true).SetTitle(" New note · blank parent = workspace ")
 	f.AddButton("Create", func() {
@@ -1759,6 +1826,11 @@ func (a *app) newNote(copyText, child bool) {
 			a.message("Parent: page:<uuid> or data-source:<uuid>", true)
 			return
 		}
+		intent, err := a.store.BeginCreate(parent, title, text)
+		if err != nil {
+			a.message("Create blocked: "+err.Error()+" · Ctrl+K → Pending writes", true)
+			return
+		}
 		a.closeModal()
 		a.creating = true
 		a.message("Creating "+title+"…", false)
@@ -1766,7 +1838,9 @@ func (a *app) newNote(copyText, child bool) {
 			p, c, err := a.backend.Create(a.ctx, parent, title, text)
 			a.ui.QueueUpdateDraw(func() {
 				a.creating = false
+				var intentErr error
 				if p.ID != "" {
+					intentErr = a.store.CompleteIntent(intent.ID)
 					a.state.Pages = mergePages([]notion.Page{p}, a.state.Pages)
 					a.listed = mergePages([]notion.Page{p}, a.listed)
 					a.persistState()
@@ -1784,7 +1858,14 @@ func (a *app) newNote(copyText, child bool) {
 					a.open(p)
 				}
 				if err != nil {
-					a.message("Create: "+err.Error()+" · check search before retrying", true)
+					if p.ID == "" {
+						a.message("Create outcome unknown · request kept in Ctrl+K → Pending writes: "+err.Error(), true)
+					} else {
+						a.message("Page created; loading delayed: "+err.Error(), true)
+					}
+				}
+				if intentErr != nil {
+					a.message("Created, but pending record could not be cleared: "+intentErr.Error(), true)
 				}
 				if a.quitting {
 					a.quit()

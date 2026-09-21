@@ -62,16 +62,6 @@ func (a *app) rememberPeople(people ...notion.Person) {
 	a.persistState()
 }
 
-func peopleFromPages(pages []notion.Page) []notion.Person {
-	var people []notion.Person
-	for _, page := range pages {
-		for _, property := range page.PropertyValues() {
-			people = append(people, property.People...)
-		}
-	}
-	return mergePeople(people, nil)
-}
-
 func peopleFromMarkdown(markdown string) []notion.Person {
 	var people []notion.Person
 	for offset := 0; ; {
@@ -177,17 +167,25 @@ func (a *app) openMentionMenu() {
 			raw := `<mention-user url="{{user://` + html.EscapeString(person.ID) + `}}">` + html.EscapeString(person.Name) + `</mention-user>`
 			add("@  "+person.Name, raw)
 		}
-		pages := mergePages(m.pages, mergePages(a.state.Recents, a.state.Pages))
+		match := searchMatcher(query)
+		seen := make(map[string]bool)
 		count := 0
-		for _, page := range pages {
-			if page.Kind != "page" || !matches(page.Title, query) {
-				continue
-			}
-			raw := `<mention-page url="https://www.notion.so/` + html.EscapeString(page.ID) + `">` + html.EscapeString(page.Title) + `</mention-page>`
-			add("↗  "+page.Title, raw)
-			count++
-			if count >= 30 {
-				break
+	pages:
+		for _, pages := range [][]notion.Page{m.pages, a.state.Recents, a.state.Pages} {
+			for _, page := range pages {
+				if seen[page.ID] {
+					continue
+				}
+				seen[page.ID] = true
+				if page.Kind != "page" || page.InTrash || !match(page.Title) {
+					continue
+				}
+				raw := `<mention-page url="https://www.notion.so/` + html.EscapeString(page.ID) + `">` + html.EscapeString(page.Title) + `</mention-page>`
+				add("↗  "+page.Title, raw)
+				count++
+				if count >= 30 {
+					break pages
+				}
 			}
 		}
 		for i, item := range m.items {
