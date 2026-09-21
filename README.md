@@ -10,7 +10,10 @@ and API access.
 
 ![ntty open on a page, with the sidebar visible](docs/images/workspace.svg)
 
-Screenshots are captured from the real interface with fictional demo content.
+![Opening a page and searching from the command palette](docs/media/ntty-demo.gif)
+
+Screenshots and recordings are captured from the real interface with fictional
+demo content (the GIF is 2x downscaled; `docs/media/ntty-demo.mp4` is sharper).
 
 ## Features
 
