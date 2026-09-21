@@ -16,7 +16,7 @@ func TestNotionObjectLabelsPreserveSource(t *testing.T) {
 		{`<mention-user id="abc" name="Léa"/>`, "@Léa", ""},
 		{`<mention-user url="{{user://abc}}">Ada Lovelace</mention-user>`, "@Ada Lovelace", ""},
 		{`<mention-user url="user://abc"/>`, "@Person", ""},
-		{`<database url="https://app.notion.com/294046bc4264801f91f9dce410cff725" inline="false" icon="📬">Tasks &amp; notes</database>`, "▦ Tasks & notes", "database:https://app.notion.com/294046bc4264801f91f9dce410cff725"},
+		{`<database url="https://app.notion.com/12345678123442348234123456789abc" inline="false" icon="📬">Tasks &amp; notes</database>`, "▦ Tasks & notes", "database:https://app.notion.com/12345678123442348234123456789abc"},
 		{`<page url="https://app.notion.com/p/123">Project</page>`, "↗ Project", "https://app.notion.com/p/123"},
 		{`<https://www.example.com/notes/the-next-step?secret=not-in-label>`, "example.com / the next step", "https://www.example.com/notes/the-next-step?secret=not-in-label"},
 		{`[https://example.com/notes](https://example.com/notes)`, "example.com / notes", "https://example.com/notes"},
@@ -111,7 +111,7 @@ func TestWrappedNotionReferenceHitTesting(t *testing.T) {
 	screen.SetSize(38, 12)
 	r := newRichEditor()
 	r.SetRect(0, 0, 38, 12)
-	source := `# Point <mention-date start="2026-09-07"/> avec Léa` + "\n\n" + `<database url="https://app.notion.com/294046bc4264801f91f9dce410cff725">Tasks</database>`
+	source := `# Planning <mention-date start="2026-09-07"/> with Alex` + "\n\n" + `<database url="https://app.notion.com/12345678123442348234123456789abc">Tasks</database>`
 	r.SetText(source, false)
 	r.Draw(screen)
 	for y := 0; y < 12; y++ {
@@ -129,7 +129,7 @@ func TestWrappedNotionReferenceHitTesting(t *testing.T) {
 	focus := func(tview.Primitive) {}
 	mouse(tview.MouseLeftDown, tcell.NewEventMouse(col, row, tcell.Button1, 0), focus)
 	mouse(tview.MouseLeftUp, tcell.NewEventMouse(col, row, tcell.ButtonNone, 0), focus)
-	if opened != "database:https://app.notion.com/294046bc4264801f91f9dce410cff725" {
+	if opened != "database:https://app.notion.com/12345678123442348234123456789abc" {
 		t.Fatalf("wrong wrapped reference: %q", opened)
 	}
 	if r.GetText() != source {

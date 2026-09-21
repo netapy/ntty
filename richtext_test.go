@@ -12,7 +12,7 @@ import (
 	"github.com/rivo/uniseg"
 )
 
-const enhancedMarkdown = "# Héllo **bold** and *italic*\n\n<span underline=\"true\" discussion-urls=\"discussion://one\">underlined</span> <mention-page url=\"https://www.notion.so/3a0046bc42648045a817ff64233f3edf\"/>\n<callout icon=\"💡\">Keep <br> metadata</callout>\n<empty-block/>\n- [x] café\n"
+const enhancedMarkdown = "# Héllo **bold** and *italic*\n\n<span underline=\"true\" discussion-urls=\"discussion://one\">underlined</span> <mention-page url=\"https://www.notion.so/12345678123442348234123456789abc\"/>\n<callout icon=\"💡\">Keep <br> metadata</callout>\n<empty-block/>\n- [x] café\n"
 
 func TestRichRoundTripAndSafeEditing(t *testing.T) {
 	lines := parseRich(enhancedMarkdown, func(string) string { return "Full article title" })
