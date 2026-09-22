@@ -1,6 +1,6 @@
 # ntty
 
-![Go 1.24+](https://img.shields.io/badge/Go-1.24%2B-8be9fd?style=flat-square&labelColor=282a36)
+![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-8be9fd?style=flat-square&labelColor=282a36)
 ![status](https://img.shields.io/badge/status-V1-bd93f9?style=flat-square&labelColor=282a36)
 ![built for the terminal](https://img.shields.io/badge/built_for-the_terminal-50fa7b?style=flat-square&labelColor=282a36)
 
@@ -61,7 +61,7 @@ installer.
 
 ### From source
 
-Requires Go 1.24+:
+Requires Go 1.27+:
 
 ```sh
 git clone https://github.com/netapy/ntty.git

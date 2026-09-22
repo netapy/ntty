@@ -13,7 +13,7 @@ Install a release:
 curl -fsSL https://raw.githubusercontent.com/netapy/ntty/main/install.sh | sh
 ```
 
-Or build from source (Go 1.24+):
+Or build from source (Go 1.27+):
 
 ```sh
 make build
